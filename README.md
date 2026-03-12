@@ -1,6 +1,4 @@
-# Baigiamasis Bakalauro darbas
-
-##  Vietos nustatymo sprendimas, paremtas Wi-Fi signalų stiprumo nustatymais
+#  Vietos nustatymo sprendimas, paremtas Wi-Fi signalų stiprumo nustatymais
 
 Kauno Technologijos Universitetas
 
