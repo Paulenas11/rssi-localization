@@ -7,7 +7,6 @@ def rssi_to_distance(rssi0, rssi, n=2.0):
     n - path loss exponent (environment dependent, typically 2-4)
     Returns distance in meters
     """
-    
     exponent = (rssi0 - rssi) / (10 * n)
     return 10 ** exponent
 
@@ -30,7 +29,7 @@ def trilaterate(p1, p2, p3, r1, r2, r3):
     E = 2 * (y3 - y1)
     F = r1**2 - r3**2 - x1**2 + x3**2 - y1**2 + y3**2
 
-    # Solve the system of equations using Cramer's rule
+    # Cramer's rule
     denominator = A * E - B * D
     if denominator == 0:
         raise ValueError("The circles do not intersect in a single point.")
