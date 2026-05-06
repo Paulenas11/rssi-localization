@@ -11,8 +11,14 @@ selected_mac = None
 latest_rssi = None
 last_seen = {}
 
+# Nauja struktūra: saugo visų ESP RSSI
+rssi_data = {}   # rssi_data[esp_id][mac] = rssi
+
+
+# ---------------- UDP LISTENER ----------------
+
 async def udp_listener():
-    global latest_rssi, last_seen
+    global latest_rssi, last_seen, rssi_data
 
     loop = asyncio.get_event_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -36,15 +42,20 @@ async def udp_listener():
         if isinstance(msg, dict):
             msg = [msg]
 
-        esp_id = msg[0].get("esp_id", msg[0].get("id", None))
+        esp_id = msg[0].get("esp_id", msg[0].get("id"))
         if esp_id is None:
             continue
 
         last_seen[esp_id] = time.time()
 
+        if esp_id not in rssi_data:
+            rssi_data[esp_id] = {}
+
         for entry in msg:
             mac = entry.get("mac", "").lower()
-            rssi = entry.get("rssi", None)
+            rssi = entry.get("rssi")
+
+            rssi_data[esp_id][mac] = rssi
 
             if selected_mac and mac == selected_mac.lower():
                 latest_rssi = rssi
@@ -66,16 +77,41 @@ ui.button("Start", on_click=start_reading)
 
 rssi_label = ui.label("RSSI: ---")
 
+
+# Lentelė visiems ESP RSSI
+table = ui.table(
+    columns=[
+        {'name': 'esp', 'label': 'ESP ID', 'field': 'esp'},
+        {'name': 'mac', 'label': 'MAC', 'field': 'mac'},
+        {'name': 'rssi', 'label': 'RSSI', 'field': 'rssi'},
+    ],
+    rows=[],
+)
+
+
 def update_ui():
+    # Atnaujinti pasirinkto MAC RSSI
     if latest_rssi is not None:
         rssi_label.set_text(f"RSSI: {latest_rssi} dBm")
     else:
         rssi_label.set_text("RSSI: ---")
 
+    # Atnaujinti lentelę
+    rows = []
+    for esp_id, macs in rssi_data.items():
+        for mac, rssi in macs.items():
+            rows.append({
+                'esp': esp_id,
+                'mac': mac,
+                'rssi': rssi,
+            })
+    table.rows = rows
+
+
 ui.timer(1, update_ui)
 
 
-# ---------------- START UDP LISTENER (universal method) ----------------
+# ---------------- START UDP LISTENER ----------------
 
 started = False
 
@@ -85,7 +121,6 @@ def start_background_tasks():
         started = True
         asyncio.create_task(udp_listener())
 
-# Paleidžiam tik vieną kartą, kai UI jau veikia
 ui.timer(0.1, start_background_tasks)
 
 
