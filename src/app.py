@@ -5,7 +5,7 @@ import json
 import time
 
 UDP_IP = "0.0.0.0"
-UDP_PORT = 5000
+UDP_PORT = 5005
 
 selected_mac = None
 latest_rssi = None
