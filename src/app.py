@@ -7,20 +7,21 @@ import time
 UDP_IP = "0.0.0.0"
 UDP_PORT = 5005
 
-selected_mac = None
-last_seen = {}
-
-# Saugo visų ESP RSSI į pasirinktą MAC
-rssi_data = {}   # rssi_data[esp_id] = rssi
+# Saugo visų ESP duomenis
+rssi_data = {}   # rssi_data[esp_id] = {'mac': mac, 'rssi': rssi, 'time': last_seen}
 
 
 # ---------------- UDP LISTENER ----------------
 
 async def udp_listener():
-    global rssi_data, last_seen, selected_mac
+    global rssi_data
 
     loop = asyncio.get_event_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    # Leidžia perleisti portą, jei senas procesas neužsidarė
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
     sock.bind((UDP_IP, UDP_PORT))
     sock.setblocking(False)
 
@@ -38,6 +39,9 @@ async def udp_listener():
         except:
             continue
 
+        # Debug: rodyti žalius duomenis
+        print("RAW:", msg)
+
         if isinstance(msg, dict):
             msg = [msg]
 
@@ -45,42 +49,30 @@ async def udp_listener():
         if esp_id is None:
             continue
 
-        last_seen[esp_id] = time.time()
+        # Imame tik pirmą įrašą (tavo ESP siunčia vieną MAC per paketą)
+        entry = msg[0]
+        mac = entry.get("mac", "").lower()
+        rssi = entry.get("rssi")
 
-        # Jei MAC nepasirinktas – nieko nedarom
-        if not selected_mac:
-            continue
-
-        # Tikrinam visus įrašus
-        for entry in msg:
-            mac = entry.get("mac", "").lower()
-            rssi = entry.get("rssi")
-
-            # Jei šitas įrašas yra apie pasirinktą MAC
-            if mac == selected_mac.lower():
-                rssi_data[esp_id] = rssi
+        rssi_data[esp_id] = {
+            'mac': mac,
+            'rssi': rssi,
+            'time': time.time(),
+        }
 
         await asyncio.sleep(0.01)
 
 
 # ---------------- UI ----------------
 
-ui.label("MAC adresas:")
-mac_input = ui.input(placeholder="AA:BB:CC:DD:EE:FF")
+ui.label("DEBUG režimas: rodomi VISI RSSI iš ESP")
 
-def start_reading():
-    global selected_mac, rssi_data
-    selected_mac = mac_input.value.strip().lower()
-    rssi_data = {}  # išvalom senus duomenis
-    print("Selected MAC:", selected_mac)
-
-ui.button("Start", on_click=start_reading)
-
-# Lentelė tik pasirinkto MAC RSSI
 table = ui.table(
     columns=[
         {'name': 'esp', 'label': 'ESP ID', 'field': 'esp'},
+        {'name': 'mac', 'label': 'MAC', 'field': 'mac'},
         {'name': 'rssi', 'label': 'RSSI', 'field': 'rssi'},
+        {'name': 'age', 'label': 'Sek. nuo paskutinio paketo', 'field': 'age'},
     ],
     rows=[],
 )
@@ -88,15 +80,20 @@ table = ui.table(
 
 def update_ui():
     rows = []
-    for esp_id, rssi in rssi_data.items():
+    now = time.time()
+
+    for esp_id, info in rssi_data.items():
         rows.append({
             'esp': esp_id,
-            'rssi': rssi,
+            'mac': info['mac'],
+            'rssi': info['rssi'],
+            'age': round(now - info['time'], 1),
         })
+
     table.rows = rows
 
 
-ui.timer(0.5, update_ui)
+ui.timer(0.3, update_ui)
 
 
 # ---------------- START UDP LISTENER ----------------
