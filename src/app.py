@@ -21,10 +21,7 @@ async def udp_listener():
 
     loop = asyncio.get_event_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    # Leidžia perleisti portą, jei senas procesas neužsidarė
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
     sock.bind((UDP_IP, UDP_PORT))
     sock.setblocking(False)
 
@@ -57,7 +54,11 @@ async def udp_listener():
             rssi = entry.get("rssi")
 
             if mac:
-                known_macs.add(mac)
+                # Jei naujas MAC → iškart atnaujinam dropdown
+                if mac not in known_macs:
+                    known_macs.add(mac)
+                    mac_dropdown.options = sorted(list(known_macs))
+
                 rssi_data[esp_id][mac] = rssi
 
         await asyncio.sleep(0.01)
@@ -69,19 +70,10 @@ ui.label("Pasirinkite MAC adresą:")
 
 mac_dropdown = ui.select(options=[], value=None)
 
-
-def refresh_dropdown():
-    mac_dropdown.options = sorted(list(known_macs))
-
-
-ui.timer(1, refresh_dropdown)
-
-
 def on_mac_selected(e):
     global selected_mac
     selected_mac = e.value
     print("Selected MAC:", selected_mac)
-
 
 mac_dropdown.on('update:model-value', on_mac_selected)
 
