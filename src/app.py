@@ -11,13 +11,12 @@ selected_mac = None
 
 # Saugo visų ESP duomenis: rssi_data[esp_id][mac] = rssi
 rssi_data = {}
-known_macs = set()
 
 
 # ---------------- UDP LISTENER ----------------
 
 async def udp_listener():
-    global rssi_data, known_macs
+    global rssi_data
 
     loop = asyncio.get_event_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -49,16 +48,12 @@ async def udp_listener():
         if esp_id not in rssi_data:
             rssi_data[esp_id] = {}
 
+        # Kiekvienas ESP siunčia daug MAC įrašų
         for entry in msg:
             mac = entry.get("mac", "").lower()
             rssi = entry.get("rssi")
 
             if mac:
-                # Jei naujas MAC → iškart atnaujinam dropdown
-                if mac not in known_macs:
-                    known_macs.add(mac)
-                    mac_dropdown.options = sorted(list(known_macs))
-
                 rssi_data[esp_id][mac] = rssi
 
         await asyncio.sleep(0.01)
@@ -66,16 +61,15 @@ async def udp_listener():
 
 # ---------------- UI ----------------
 
-ui.label("Pasirinkite MAC adresą:")
+ui.label("Įveskite MAC adresą (rankiniu būdu):")
+mac_input = ui.input(placeholder="AA:BB:CC:DD:EE:FF")
 
-mac_dropdown = ui.select(options=[], value=None)
-
-def on_mac_selected(e):
+def set_mac():
     global selected_mac
-    selected_mac = e.value
+    selected_mac = mac_input.value.strip().lower()
     print("Selected MAC:", selected_mac)
 
-mac_dropdown.on('update:model-value', on_mac_selected)
+ui.button("Start", on_click=set_mac)
 
 
 # Lentelė pasirinkto MAC RSSI
