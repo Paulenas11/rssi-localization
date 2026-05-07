@@ -77,6 +77,14 @@ async def udp_listener():
 
         esp_id = str(esp_id)
 
+        # ← ČIA NORMALIZACIJA
+        if esp_id in ("ESP1", "1"):
+            esp_id = "ESP_1"
+        elif esp_id in ("ESP2", "2"):
+            esp_id = "ESP_2"
+        elif esp_id in ("ESP3", "3"):
+            esp_id = "ESP_3"
+
         if esp_id not in rssi_data:
             rssi_data[esp_id] = {}
 
@@ -89,6 +97,7 @@ async def udp_listener():
                     "rssi": int(rssi),
                     "time": time.time(),
                 }
+
 
 
 def start_system():
