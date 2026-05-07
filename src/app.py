@@ -18,9 +18,9 @@ selected_mac = None
 system_active = False
 
 esp_positions = {
-    "ESP_1": (0.0, 1.0),
-    "ESP_2": (-1.0, 0.0),
-    "ESP_3": (1.0, 0.0),
+    "ESP_1": (0.0, 10.0),
+    "ESP_2": (-10.0, 0.0),
+    "ESP_3": (10.0, 0.0),
 }
 
 rssi_data = {}
@@ -199,8 +199,8 @@ def calculate_position(rssi_values):
             r1, r2, r3,
         )
 
-        x = max(-1.5, min(1.5, x))
-        y = max(-0.5, min(1.5, y))
+        x = max(-2, min(12, x))
+        y = max(-2, min(12, y))
 
         return x, y
 
@@ -245,8 +245,8 @@ def update_plot():
 
     ax.clear()
     ax.set_facecolor("#1e293b")
-    ax.set_xlim(-1.5, 1.5)
-    ax.set_ylim(-0.5, 1.5)
+    ax.set_xlim(-2, 12)
+    ax.set_ylim(-2, 12)
     ax.grid(color="#334155")
     ax.set_xlabel("X, m")
     ax.set_ylabel("Y, m")
