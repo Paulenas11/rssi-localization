@@ -3,22 +3,49 @@ import asyncio
 import socket
 import json
 import time
+import matplotlib.pyplot as plt
+
+from utils import rssi_to_distance, trilaterate
+
 
 UDP_IP = "0.0.0.0"
 UDP_PORT = 5005
 
-selected_mac = None
+# Kalibravimo reikšmė: RSSI prie 1 metro
+RSSI_0 = -45
+PATH_LOSS_N = 2.3
 
-# Saugo visų ESP duomenis: rssi_data[esp_id][mac] = rssi
+selected_mac = None
+system_active = False
+
+# ESP koordinatės 2D plote
+esp_positions = {
+    "ESP_1": (0.0, 1.0),
+    "ESP_2": (-1.0, 0.0),
+    "ESP_3": (1.0, 0.0),
+}
+
+# rssi_data[esp_id][mac] = {"rssi": -65, "time": 123456}
 rssi_data = {}
 
+current_position = {"x": None, "y": None}
 
-# ---------------- UDP LISTENER ----------------
+
+def add_log(text: str):
+    timestamp = time.strftime("%H:%M:%S")
+    logs.insert(0, f"[{timestamp}] {text}")
+    if len(logs) > 12:
+        logs.pop()
+    log_container.clear()
+    with log_container:
+        for item in logs:
+            ui.label(item).classes("text-sm")
+
 
 async def udp_listener():
     global rssi_data
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((UDP_IP, UDP_PORT))
@@ -28,90 +55,290 @@ async def udp_listener():
 
     while True:
         try:
-            data, addr = await loop.run_in_executor(None, sock.recvfrom, 4096)
-        except BlockingIOError:
-            await asyncio.sleep(0.01)
+            data, addr = await loop.sock_recvfrom(sock, 4096)
+        except Exception:
+            await asyncio.sleep(0.05)
             continue
 
         try:
             msg = json.loads(data.decode())
-        except:
+        except Exception:
             continue
 
         if isinstance(msg, dict):
             msg = [msg]
 
+        if not msg:
+            continue
+
         esp_id = msg[0].get("esp_id", msg[0].get("id"))
         if esp_id is None:
             continue
 
+        esp_id = str(esp_id)
+
         if esp_id not in rssi_data:
             rssi_data[esp_id] = {}
 
-        # Kiekvienas ESP siunčia daug MAC įrašų
         for entry in msg:
             mac = entry.get("mac", "").lower()
             rssi = entry.get("rssi")
 
-            if mac:
-                rssi_data[esp_id][mac] = rssi
+            if mac and rssi is not None:
+                rssi_data[esp_id][mac] = {
+                    "rssi": int(rssi),
+                    "time": time.time(),
+                }
 
-        await asyncio.sleep(0.01)
+
+def start_system():
+    global selected_mac, system_active
+
+    mac = mac_input.value.strip().lower()
+
+    if not mac:
+        add_log("MAC adresas neįvestas")
+        return
+
+    selected_mac = mac
+    system_active = True
+
+    selected_mac_label.set_text(f"MAC: {selected_mac.upper()}")
+    status_label.set_text("STATUS: ACTIVE")
+    status_label.classes(replace="text-sm font-bold text-green-400")
+
+    add_log(f"Pasirinktas MAC: {selected_mac.upper()}")
+    add_log("Sistema paleista")
+
+
+def stop_system():
+    global system_active
+
+    system_active = False
+    status_label.set_text("STATUS: STOPPED")
+    status_label.classes(replace="text-sm font-bold text-red-400")
+
+    x_label.set_text("X: -")
+    y_label.set_text("Y: -")
+
+    for esp_id in esp_positions.keys():
+        rssi_labels[esp_id].set_text(f"{esp_id}: nėra duomenų")
+        esp_status_labels[esp_id].set_text(f"{esp_id}: OFFLINE")
+        esp_status_labels[esp_id].classes(replace="text-red-400")
+
+    update_plot()
+    add_log("Sistema sustabdyta")
+
+
+def get_selected_rssi():
+    if not selected_mac:
+        return {}
+
+    result = {}
+
+    for esp_id in esp_positions.keys():
+        esp_macs = rssi_data.get(esp_id, {})
+
+        if selected_mac in esp_macs:
+            result[esp_id] = esp_macs[selected_mac]["rssi"]
+
+    return result
+
+
+def calculate_position(rssi_values):
+    if len(rssi_values) < 3:
+        return None
+
+    try:
+        r1 = rssi_to_distance(RSSI_0, rssi_values["ESP_1"], PATH_LOSS_N)
+        r2 = rssi_to_distance(RSSI_0, rssi_values["ESP_2"], PATH_LOSS_N)
+        r3 = rssi_to_distance(RSSI_0, rssi_values["ESP_3"], PATH_LOSS_N)
+
+        x, y = trilaterate(
+            esp_positions["ESP_1"],
+            esp_positions["ESP_2"],
+            esp_positions["ESP_3"],
+            r1, r2, r3
+        )
+
+        x = max(0, min(10, x))
+        y = max(0, min(10, y))
+
+        return x, y
+
+    except Exception:
+        return None
+
+
+def update_dashboard():
+    global current_position
+
+    if not system_active or not selected_mac:
+        return
+
+    selected_rssi = get_selected_rssi()
+
+    # RSSI tekstai
+    for esp_id in esp_positions.keys():
+        value = selected_rssi.get(esp_id)
+
+        if value is None:
+            rssi_labels[esp_id].set_text(f"{esp_id}: nėra duomenų")
+        else:
+            rssi_labels[esp_id].set_text(f"{esp_id}: {value} dBm")
+
+    # ESP statusai
+    now = time.time()
+    for esp_id in esp_positions.keys():
+        last_data = None
+
+        if selected_mac in rssi_data.get(esp_id, {}):
+            last_data = rssi_data[esp_id][selected_mac]["time"]
+
+        if last_data and now - last_data < 3:
+            esp_status_labels[esp_id].set_text(f"{esp_id}: ACTIVE")
+            esp_status_labels[esp_id].classes(replace="text-green-400")
+        else:
+            esp_status_labels[esp_id].set_text(f"{esp_id}: OFFLINE")
+            esp_status_labels[esp_id].classes(replace="text-red-400")
+
+    # Pozicijos skaičiavimas
+    pos = calculate_position(selected_rssi)
+
+    if pos:
+        current_position["x"] = pos[0]
+        current_position["y"] = pos[1]
+
+        x_label.set_text(f"X: {pos[0]:.2f} m")
+        y_label.set_text(f"Y: {pos[1]:.2f} m")
+
+    update_plot()
+
+
+def update_plot():
+    ax.clear()
+
+    ax.set_facecolor("#1e293b")
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-0.5, 1.5)
+    ax.grid(color="#334155")
+    ax.set_xlabel("X, m")
+    ax.set_ylabel("Y, m")
+
+    for name, (x, y) in esp_positions.items():
+        ax.scatter(x, y, s=120, c="#22c55e", edgecolors="white", linewidths=1.5)
+        ax.text(x, y + 0.3, name, color="white", fontsize=10, ha="center")
+
+    # Objektą rodyti tik tada, kai sistema paleista ir MAC pasirinktas
+    if system_active and selected_mac and current_position["x"] is not None:
+        ax.scatter(
+            current_position["x"],
+            current_position["y"],
+            s=160,
+            c="#3b82f6",
+            edgecolors="white",
+            linewidths=1.5
+        )
+
+        ax.text(
+            current_position["x"],
+            current_position["y"] + 0.3,
+            "Objektas",
+            color="white",
+            fontsize=10,
+            ha="center"
+        )
+
+    fig.update()
 
 
 # ---------------- UI ----------------
 
-ui.label("Įveskite MAC adresą (rankiniu būdu):")
-mac_input = ui.input(placeholder="AA:BB:CC:DD:EE:FF")
+ui.colors(primary="#3b82f6")
 
-def set_mac():
-    global selected_mac
-    selected_mac = mac_input.value.strip().lower()
-    print("Selected MAC:", selected_mac)
+ui.add_head_html("""
+<style>
+body {
+    background-color: #0f172a;
+    color: #e2e8f0;
+    font-family: Inter, sans-serif;
+}
+.card-clean {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    padding: 12px;
+    border-radius: 8px;
+}
+</style>
+""")
 
-ui.button("Start", on_click=set_mac)
+logs = []
+
+with ui.row().classes("w-full h-screen p-4 gap-4"):
+
+    # LEFT PANEL
+    with ui.column().classes("w-64 gap-4"):
+
+        selected_mac_label = ui.label("MAC: nepasirinktas").classes("text-sm font-bold text-blue-400")
+        status_label = ui.label("STATUS: STOPPED").classes("text-sm font-bold text-red-400")
+
+        with ui.element("div").classes("card-clean w-full"):
+            ui.label("Mazgų būsena").classes("font-bold text-lg mb-1")
+
+            esp_status_labels = {}
+            for esp_id in esp_positions.keys():
+                esp_status_labels[esp_id] = ui.label(f"{esp_id}: OFFLINE").classes("text-red-400")
+
+        with ui.element("div").classes("card-clean w-full"):
+            ui.label("RSSI duomenys").classes("font-bold text-lg mb-1")
+
+            rssi_labels = {}
+            for esp_id in esp_positions.keys():
+                rssi_labels[esp_id] = ui.label(f"{esp_id}: nėra duomenų")
+
+            ui.separator().classes("my-2")
+
+            ui.label("Apskaičiuota pozicija").classes("font-bold text-lg")
+            x_label = ui.label("X: -")
+            y_label = ui.label("Y: -")
+
+    # CENTER PANEL
+    with ui.column().classes("flex-1"):
+
+        ui.label("2D lokalizavimo laukas").classes("text-xl font-bold mb-2 text-blue-300")
+
+        with ui.pyplot(figsize=(6, 6)).classes("w-full h-[560px]") as fig:
+            ax = fig.fig.gca()
+            update_plot()
+
+        with ui.row().classes("w-full justify-center gap-6 mt-4"):
+            ui.button("START", on_click=start_system).classes("bg-green-600 px-10 text-white")
+            ui.button("STOP", on_click=stop_system).classes("bg-red-600 px-10 text-white")
+
+    # RIGHT PANEL
+    with ui.column().classes("w-80 gap-4"):
+
+        with ui.element("div").classes("card-clean w-full"):
+            ui.label("Pasirinktas objektas").classes("font-bold text-lg mb-1")
+            mac_input = ui.input("MAC adresas", placeholder="AA:BB:CC:DD:EE:FF").classes("w-full")
+
+        with ui.element("div").classes("card-clean w-full h-[500px]"):
+            ui.label("Įvykiai").classes("font-bold text-lg mb-1")
+            log_container = ui.column().classes("gap-1")
 
 
-# Lentelė pasirinkto MAC RSSI
-table = ui.table(
-    columns=[
-        {'name': 'esp', 'label': 'ESP ID', 'field': 'esp'},
-        {'name': 'rssi', 'label': 'RSSI', 'field': 'rssi'},
-    ],
-    rows=[],
-)
+# ---------------- TIMERS ----------------
 
-
-def update_table():
-    if not selected_mac:
-        table.rows = []
-        return
-
-    rows = []
-    for esp_id, macs in rssi_data.items():
-        if selected_mac in macs:
-            rows.append({
-                'esp': esp_id,
-                'rssi': macs[selected_mac],
-            })
-
-    table.rows = rows
-
-
-ui.timer(0.3, update_table)
-
-
-# ---------------- START UDP LISTENER ----------------
-
-started = False
+listener_started = False
 
 def start_background_tasks():
-    global started
-    if not started:
-        started = True
+    global listener_started
+    if not listener_started:
+        listener_started = True
         asyncio.create_task(udp_listener())
+        add_log(f"UDP listener paleistas: {UDP_PORT}")
 
-ui.timer(0.1, start_background_tasks)
+ui.timer(0.1, start_background_tasks, once=True)
+ui.timer(0.5, update_dashboard)
 
-
-ui.run(host='0.0.0.0', port=8080, reload=False)
+ui.run(host="0.0.0.0", port=8080, reload=False)

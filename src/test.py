@@ -3,7 +3,7 @@ import json
 import time
 
 UDP_IP = "0.0.0.0"
-UDP_PORT = 5000
+UDP_PORT = 5005
 
 # MAC adresas, kurį norime filtruoti (pvz. telefono MAC)
 TARGET_MAC = "b8:27:eb:49:1e:1d"   # pakeisk į savo
