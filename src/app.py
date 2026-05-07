@@ -13,6 +13,7 @@ UDP_PORT = 5005
 
 RSSI_0 = -45
 PATH_LOSS_N = 2.3
+ESP_TIMEOUT = 8
 
 selected_mac = None
 system_active = False
@@ -91,14 +92,11 @@ def udp_listener_thread():
                         "time": time.time(),
                     }
 
-        print(f"\n===== {esp_id} packet received =====")
-        for entry in msg:
-            print("MAC:", entry.get("mac"), "RSSI:", entry.get("rssi"))
-
 
 def add_log(text: str):
     timestamp = time.strftime("%H:%M:%S")
     logs.insert(0, f"[{timestamp}] {text}")
+
     if len(logs) > 14:
         logs.pop()
 
@@ -112,6 +110,7 @@ def start_system():
     global selected_mac, system_active
 
     mac = mac_input.value.strip().lower()
+
     if not mac:
         add_log("MAC adresas neįvestas")
         return
@@ -119,7 +118,6 @@ def start_system():
     selected_mac = mac
     system_active = True
 
-    # NEPERRAŠINĖK current_position čia į None, leisk dashboard’ui užpildyti
     current_position["x"] = None
     current_position["y"] = None
 
@@ -129,12 +127,14 @@ def start_system():
 
     add_log(f"Pasirinktas MAC: {selected_mac.upper()}")
     add_log("Sistema paleista")
+    update_plot()
 
 
 def stop_system():
     global system_active
 
     system_active = False
+
     current_position["x"] = None
     current_position["y"] = None
 
@@ -151,7 +151,6 @@ def stop_system():
     add_log("Sistema sustabdyta")
 
 
-
 def update_esp_statuses():
     now = time.time()
 
@@ -161,7 +160,7 @@ def update_esp_statuses():
     for esp_id in esp_positions.keys():
         last_seen = last_seen_copy.get(esp_id)
 
-        if last_seen and now - last_seen < 3:
+        if last_seen and now - last_seen < ESP_TIMEOUT:
             esp_status_labels[esp_id].set_text(f"{esp_id}: ACTIVE")
             esp_status_labels[esp_id].classes(replace="text-green-400")
         else:
@@ -199,7 +198,7 @@ def calculate_position(rssi_values):
             r1, r2, r3,
         )
 
-        x = max(-2, min(12, x))
+        x = max(-12, min(12, x))
         y = max(-2, min(12, y))
 
         return x, y
@@ -210,8 +209,6 @@ def calculate_position(rssi_values):
 
 
 def update_dashboard():
-    global current_position
-
     if not system_active or not selected_mac:
         return
 
@@ -238,44 +235,63 @@ def update_dashboard():
 
 
 def update_plot():
-    print("update_plot()",
-          "active=", system_active,
-          "mac=", selected_mac,
-          "pos=", current_position)
+    plot_container.clear()
 
-    ax.clear()
-    ax.set_facecolor("#1e293b")
-    ax.set_xlim(-2, 12)
-    ax.set_ylim(-2, 12)
-    ax.grid(color="#334155")
-    ax.set_xlabel("X, m")
-    ax.set_ylabel("Y, m")
+    with plot_container:
+        with ui.pyplot(figsize=(6, 6)).classes("w-full h-[560px]") as plot:
+            ax = plot.fig.gca()
 
-    for name, (x, y) in esp_positions.items():
-        ax.scatter(x, y, s=120, c="#22c55e", edgecolors="white", linewidths=1.5)
-        ax.text(x, y + 0.08, name, color="white", fontsize=10, ha="center")
+            ax.set_facecolor("#1e293b")
+            ax.set_xlim(-12, 12)
+            ax.set_ylim(-2, 12)
+            ax.grid(color="#334155")
+            ax.set_xlabel("X, m")
+            ax.set_ylabel("Y, m")
 
-    if system_active and selected_mac and current_position["x"] is not None:
-        print("DRAW OBJECT AT:", current_position)
-        ax.scatter(
-            current_position["x"],
-            current_position["y"],
-            s=160,
-            c="#3b82f6",
-            edgecolors="white",
-            linewidths=1.5,
-        )
-        ax.text(
-            current_position["x"],
-            current_position["y"] + 0.08,
-            "Objektas",
-            color="white",
-            fontsize=10,
-            ha="center",
-        )
+            for name, (x, y) in esp_positions.items():
+                ax.scatter(
+                    x, y,
+                    s=120,
+                    c="#22c55e",
+                    edgecolors="white",
+                    linewidths=1.5,
+                    zorder=5,
+                )
 
-    fig.update()
+                ax.text(
+                    x, y + 0.3,
+                    name,
+                    color="white",
+                    fontsize=10,
+                    ha="center",
+                    zorder=6,
+                )
 
+            if (
+                system_active
+                and selected_mac
+                and current_position["x"] is not None
+                and current_position["y"] is not None
+            ):
+                ax.scatter(
+                    current_position["x"],
+                    current_position["y"],
+                    s=260,
+                    c="#3b82f6",
+                    edgecolors="white",
+                    linewidths=2.0,
+                    zorder=20,
+                )
+
+                ax.text(
+                    current_position["x"],
+                    current_position["y"] + 0.5,
+                    "Objektas",
+                    color="white",
+                    fontsize=11,
+                    ha="center",
+                    zorder=21,
+                )
 
 
 ui.colors(primary="#3b82f6")
@@ -329,9 +345,7 @@ with ui.row().classes("w-full h-screen p-4 gap-4"):
 
         ui.label("2D lokalizavimo laukas").classes("text-xl font-bold mb-2 text-blue-300")
 
-        with ui.pyplot(figsize=(6, 6)).classes("w-full h-[560px]") as fig:
-            ax = fig.fig.gca()
-            update_plot()
+        plot_container = ui.column().classes("w-full h-[560px]")
 
         with ui.row().classes("w-full justify-center gap-6 mt-4"):
             ui.button("START", on_click=start_system).classes("bg-green-600 px-10 text-white")
@@ -350,6 +364,7 @@ with ui.row().classes("w-full h-screen p-4 gap-4"):
 
 listener_started = False
 
+
 def start_background_tasks():
     global listener_started
 
@@ -360,6 +375,7 @@ def start_background_tasks():
         thread.start()
 
         add_log(f"UDP listener paleistas: {UDP_PORT}")
+        update_plot()
 
 
 ui.timer(0.1, start_background_tasks, once=True)
