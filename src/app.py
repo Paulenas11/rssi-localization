@@ -109,17 +109,19 @@ def add_log(text: str):
 
 
 def start_system():
-    global selected_mac, system_active, current_position
+    global selected_mac, system_active
 
     mac = mac_input.value.strip().lower()
-
     if not mac:
         add_log("MAC adresas neįvestas")
         return
 
     selected_mac = mac
     system_active = True
-    current_position = {"x": None, "y": None}
+
+    # NEPERRAŠINĖK current_position čia į None, leisk dashboard’ui užpildyti
+    current_position["x"] = None
+    current_position["y"] = None
 
     selected_mac_label.set_text(f"MAC: {selected_mac.upper()}")
     status_label.set_text("STATUS: ACTIVE")
@@ -130,10 +132,11 @@ def start_system():
 
 
 def stop_system():
-    global system_active, current_position
+    global system_active
 
     system_active = False
-    current_position = {"x": None, "y": None}
+    current_position["x"] = None
+    current_position["y"] = None
 
     status_label.set_text("STATUS: STOPPED")
     status_label.classes(replace="text-sm font-bold text-red-400")
@@ -146,6 +149,7 @@ def stop_system():
 
     update_plot()
     add_log("Sistema sustabdyta")
+
 
 
 def update_esp_statuses():
@@ -234,8 +238,12 @@ def update_dashboard():
 
 
 def update_plot():
-    ax.clear()
+    print("update_plot()",
+          "active=", system_active,
+          "mac=", selected_mac,
+          "pos=", current_position)
 
+    ax.clear()
     ax.set_facecolor("#1e293b")
     ax.set_xlim(-1.5, 1.5)
     ax.set_ylim(-0.5, 1.5)
@@ -248,6 +256,7 @@ def update_plot():
         ax.text(x, y + 0.08, name, color="white", fontsize=10, ha="center")
 
     if system_active and selected_mac and current_position["x"] is not None:
+        print("DRAW OBJECT AT:", current_position)
         ax.scatter(
             current_position["x"],
             current_position["y"],
@@ -266,6 +275,7 @@ def update_plot():
         )
 
     fig.update()
+
 
 
 ui.colors(primary="#3b82f6")
