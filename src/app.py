@@ -108,6 +108,20 @@ def add_log(text: str):
 
 
 def start_system():
+        # --- ESP COUNT CHECK ---
+    active_esp = 0
+    now = time.time()
+
+    with data_lock:
+        for esp_id in esp_positions.keys():
+            last_seen = esp_last_seen.get(esp_id)
+            if last_seen and now - last_seen < ESP_TIMEOUT:
+                active_esp += 1
+
+    if active_esp < 3:
+        add_log("Nepakanka ESP mazgų trilateracijai (reikia bent 3)")
+        return
+
     global selected_mac, system_active
 
     mac = mac_input.value.strip().lower()
@@ -223,6 +237,31 @@ def update_dashboard():
         else:
             rssi_labels[esp_id].set_text(f"{esp_id}: {value} dBm")
 
+    # --- HOTSPOT DISCONNECT CHECK ---
+    if selected_mac:
+        last_seen_times = []
+        with data_lock:
+            for esp_id in esp_positions.keys():
+                entry = rssi_data.get(esp_id, {}).get(selected_mac)
+                if entry:
+                    last_seen_times.append(entry["time"])
+
+        if last_seen_times:
+            if time.time() - max(last_seen_times) > 3:
+                add_log("Lokalizuojamas įrenginys atsijungė")
+                stop_system()
+                return
+
+        # --- ESP DISCONNECT CHECK ---
+    now = time.time()
+    with data_lock:
+        for esp_id in esp_positions.keys():
+            last_seen = esp_last_seen.get(esp_id)
+            if not last_seen or now - last_seen > ESP_TIMEOUT:
+                add_log(f"{esp_id} neatsako. Trilateracija sustabdyta.")
+                stop_system()
+                return
+
     pos = calculate_position(selected_rssi)
 
     if pos:
@@ -232,6 +271,22 @@ def update_dashboard():
         x_label.set_text(f"X: {pos[0]:.2f} m")
         y_label.set_text(f"Y: {pos[1]:.2f} m")
 
+        # --- SERVER DATA FLOW CHECK ---
+    any_data = False
+    with data_lock:
+        for esp_id in rssi_data.keys():
+            if rssi_data[esp_id]:
+                any_data = True
+                break
+
+    if not any_data:
+        add_log("Serveris negauna duomenų iš ESP mazgų")
+
+        # --- DIAGNOSTICS ---
+    if selected_rssi:
+        add_log(f"RSSI: {selected_rssi}")
+    if current_position["x"] is not None:
+        add_log(f"Pozicija: ({current_position['x']:.2f}, {current_position['y']:.2f})")
     update_plot()
 
 
@@ -349,8 +404,19 @@ with ui.row().classes("w-full h-screen p-4 gap-4"):
         plot_container = ui.column().classes("w-full h-[560px]")
 
         with ui.row().classes("w-full justify-center gap-6 mt-4"):
-            ui.button("START", on_click=start_system).classes("bg-green-600 px-10 text-white")
-            ui.button("STOP", on_click=stop_system).classes("bg-red-600 px-10 text-white")
+            start_button = ui.button("START", on_click=start_system).classes("bg-green-600 px-10 text-white")
+            stop_button = ui.button("STOP", on_click=stop_system).classes("bg-red-600 px-10 text-white")
+
+            def update_buttons():
+                if system_active:
+                    start_button.disable()
+                    stop_button.enable()
+                else:
+                    start_button.enable()
+                    stop_button.disable()
+
+            ui.timer(0.2, update_buttons)
+
 
     with ui.column().classes("w-80 gap-4"):
 
