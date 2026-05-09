@@ -7,7 +7,6 @@ import math
 
 from utils import rssi_to_distance, trilaterate
 
-
 UDP_IP = "0.0.0.0"
 UDP_PORT = 5005
 
@@ -15,21 +14,43 @@ RSSI_0 = -45
 PATH_LOSS_N = 2.3
 ESP_TIMEOUT = 8
 TARGET_TIMEOUT = 5
+POSITION_PADDING_METERS = 5.0
+SMOOTHING_ALPHA = 0.35
 
 selected_mac = None
 system_active = False
 
+# ESP coordinates used for the OSM recording version.
+# Update these after placing the ESP nodes in the real test area.
 esp_geo_positions = {
     "ESP_1": (54.905028, 23.966833),
     "ESP_2": (54.905028, 23.966953),
     "ESP_3": (54.905100, 23.966833),
 }
 
+
+def latlon_to_xy(lat, lon, lat0, lon0):
+    x = (lon - lon0) * 111111.0 * math.cos(math.radians(lat0))
+    y = (lat - lat0) * 111111.0
+    return x, y
+
+
+def xy_to_latlon(x, y, lat0, lon0):
+    dlat = y / 111111.0
+    dlon = x / (111111.0 * math.cos(math.radians(lat0)))
+    return lat0 + dlat, lon0 + dlon
+
+
+origin_lat, origin_lon = esp_geo_positions["ESP_1"]
 esp_positions = {
-    "ESP_1": (0.0, 0.0),
-    "ESP_2": (8.0, 0.0),
-    "ESP_3": (0.0, 8.0),
+    esp_id: latlon_to_xy(lat, lon, origin_lat, origin_lon)
+    for esp_id, (lat, lon) in esp_geo_positions.items()
 }
+
+min_x = min(x for x, _ in esp_positions.values()) - POSITION_PADDING_METERS
+max_x = max(x for x, _ in esp_positions.values()) + POSITION_PADDING_METERS
+min_y = min(y for _, y in esp_positions.values()) - POSITION_PADDING_METERS
+max_y = max(y for _, y in esp_positions.values()) + POSITION_PADDING_METERS
 
 rssi_data = {}
 esp_last_seen = {}
@@ -38,12 +59,7 @@ current_position = {"x": None, "y": None}
 data_lock = threading.Lock()
 map_inited = False
 logs = []
-
-
-def xy_to_latlon(x, y, lat0, lon0):
-    dlat = y / 111111.0
-    dlon = x / (111111.0 * math.cos(math.radians(lat0)))
-    return lat0 + dlat, lon0 + dlon
+last_target_warning = 0.0
 
 
 def normalize_esp_id(esp_id):
@@ -205,11 +221,13 @@ def get_selected_rssi():
         return {}
 
     result = {}
+    now = time.time()
 
     with data_lock:
         for esp_id in esp_positions.keys():
-            if selected_mac in rssi_data.get(esp_id, {}):
-                result[esp_id] = rssi_data[esp_id][selected_mac]["rssi"]
+            entry = rssi_data.get(esp_id, {}).get(selected_mac)
+            if entry and now - entry["time"] <= TARGET_TIMEOUT:
+                result[esp_id] = entry["rssi"]
 
     return result
 
@@ -230,8 +248,12 @@ def calculate_position(rssi_values):
             r1, r2, r3,
         )
 
-        x = max(-5, min(15, x))
-        y = max(-5, min(15, y))
+        x = max(min_x, min(max_x, x))
+        y = max(min_y, min(max_y, y))
+
+        if current_position["x"] is not None and current_position["y"] is not None:
+            x = SMOOTHING_ALPHA * x + (1 - SMOOTHING_ALPHA) * current_position["x"]
+            y = SMOOTHING_ALPHA * y + (1 - SMOOTHING_ALPHA) * current_position["y"]
 
         return x, y
 
@@ -240,11 +262,13 @@ def calculate_position(rssi_values):
         return None
 
 
-def update_object_marker(lat, lon):
+def update_object_marker(lat, lon, x, y):
     ui.run_javascript(f"""
         if (!window.leaflet_map || typeof L === 'undefined') {{
             return;
         }}
+
+        const label = 'Objektas<br>X: {x:.2f} m<br>Y: {y:.2f} m';
 
         if (!window.obj_marker) {{
             window.obj_marker = L.circleMarker([{lat}, {lon}], {{
@@ -253,14 +277,17 @@ def update_object_marker(lat, lon):
                 fillColor: '#3b82f6',
                 fillOpacity: 1,
                 weight: 3
-            }}).addTo(window.leaflet_map).bindPopup('Objektas');
+            }}).addTo(window.leaflet_map).bindPopup(label);
         }} else {{
             window.obj_marker.setLatLng([{lat}, {lon}]);
+            window.obj_marker.setPopupContent(label);
         }}
     """)
 
 
 def update_dashboard():
+    global last_target_warning
+
     if not system_active or not selected_mac:
         return
 
@@ -270,7 +297,7 @@ def update_dashboard():
         value = selected_rssi.get(esp_id)
 
         if value is None:
-            rssi_labels[esp_id].set_text(f"{esp_id}: nėra duomenų")
+            rssi_labels[esp_id].set_text(f"{esp_id}: nėra šviežių duomenų")
         else:
             rssi_labels[esp_id].set_text(f"{esp_id}: {value} dBm")
 
@@ -284,16 +311,10 @@ def update_dashboard():
                 stop_system()
                 return
 
-    last_seen_times = []
-    with data_lock:
-        for esp_id in esp_positions.keys():
-            entry = rssi_data.get(esp_id, {}).get(selected_mac)
-            if entry:
-                last_seen_times.append(entry["time"])
-
-    if last_seen_times and now - max(last_seen_times) > TARGET_TIMEOUT:
-        add_log("Lokalizuojamas įrenginys nebeaptinkamas")
-        stop_system()
+    if len(selected_rssi) < 3:
+        if now - last_target_warning > TARGET_TIMEOUT:
+            add_log("Laukiama RSSI duomenų iš visų 3 ESP mazgų")
+            last_target_warning = now
         return
 
     pos = calculate_position(selected_rssi)
@@ -302,15 +323,14 @@ def update_dashboard():
         current_position["x"] = pos[0]
         current_position["y"] = pos[1]
 
-        lat0, lon0 = esp_geo_positions["ESP_1"]
-        lat, lon = xy_to_latlon(pos[0], pos[1], lat0, lon0)
+        lat, lon = xy_to_latlon(pos[0], pos[1], origin_lat, origin_lon)
 
         x_label.set_text(f"X: {pos[0]:.2f} m")
         y_label.set_text(f"Y: {pos[1]:.2f} m")
         lat_label.set_text(f"Lat: {lat:.6f}")
         lon_label.set_text(f"Lon: {lon:.6f}")
 
-        update_object_marker(lat, lon)
+        update_object_marker(lat, lon, pos[0], pos[1])
 
 
 def init_map():
@@ -321,33 +341,41 @@ def init_map():
 
     map_inited = True
 
-    lat0, lon0 = esp_geo_positions["ESP_1"]
+    bounds_points = [
+        f"[{lat}, {lon}]"
+        for lat, lon in esp_geo_positions.values()
+    ]
+    bounds_js = ",\n                ".join(bounds_points)
 
     ui.run_javascript(f"""
+        const map = document.getElementById('map');
+        if (!map) {{
+            return;
+        }}
+
         if (typeof L === 'undefined') {{
             console.error('Leaflet not loaded');
         }} else {{
             window.leaflet_map = L.map('map', {{
                 zoomControl: true,
                 preferCanvas: true
-            }}).setView([{lat0}, {lon0}], 21);
+            }}).setView([{origin_lat}, {origin_lon}], 21);
 
             L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
                 maxNativeZoom: 19,
                 maxZoom: 22,
-                minZoom: 18,
+                minZoom: 17,
                 updateWhenIdle: false,
                 updateWhenZooming: true,
-                keepBuffer: 4
+                keepBuffer: 4,
+                attribution: '&copy; OpenStreetMap contributors'
             }}).addTo(window.leaflet_map);
 
             window.esp_markers = {{}};
             window.obj_marker = null;
 
             const bounds = L.latLngBounds([
-                [54.905028, 23.966833],
-                [54.905028, 23.966953],
-                [54.905100, 23.966833]
+                {bounds_js}
             ]);
 
             window.leaflet_map.fitBounds(bounds.pad(2.0));
@@ -369,8 +397,11 @@ def refresh_map_size():
 
 def update_esp_markers():
     for esp_id, (lat, lon) in esp_geo_positions.items():
+        x, y = esp_positions[esp_id]
         ui.run_javascript(f"""
             if (window.leaflet_map && typeof L !== 'undefined') {{
+                const label = '{esp_id}<br>X: {x:.2f} m<br>Y: {y:.2f} m';
+
                 if (!window.esp_markers['{esp_id}']) {{
                     window.esp_markers['{esp_id}'] = L.circleMarker([{lat}, {lon}], {{
                         radius: 8,
@@ -378,9 +409,10 @@ def update_esp_markers():
                         fillColor: '#22c55e',
                         fillOpacity: 1,
                         weight: 2
-                    }}).addTo(window.leaflet_map).bindPopup('{esp_id}');
+                    }}).addTo(window.leaflet_map).bindPopup(label);
                 }} else {{
                     window.esp_markers['{esp_id}'].setLatLng([{lat}, {lon}]);
+                    window.esp_markers['{esp_id}'].setPopupContent(label);
                 }}
             }}
         """)
@@ -408,6 +440,9 @@ body {
     width: 100%;
     height: 560px;
     background-color: #0f172a;
+}
+.leaflet-container {
+    background: #0f172a;
 }
 </style>
 """)
@@ -464,10 +499,6 @@ with ui.row().classes("w-full h-screen p-4 gap-4"):
             ui.timer(0.2, update_buttons)
 
     with ui.column().classes("w-80 gap-4"):
-
-        with ui.element("div").classes("card-clean w-full"):
-            ui.label("Pasirinktas objektas").classes("font-bold text-lg mb-1")
-            mac_input = ui.input("MAC adresas", placeholder="AA:BB:CC:DD:EE:FF").classes("w-full")
 
         with ui.element("div").classes("card-clean w-full h-[500px]"):
             ui.label("Įvykiai").classes("font-bold text-lg mb-1")
