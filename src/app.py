@@ -3,7 +3,7 @@ import socket
 import json
 import time
 import threading
-import matplotlib.pyplot as plt
+import math
 
 from utils import rssi_to_distance, trilaterate
 
@@ -14,22 +14,36 @@ UDP_PORT = 5005
 RSSI_0 = -45
 PATH_LOSS_N = 2.3
 ESP_TIMEOUT = 8
+TARGET_TIMEOUT = 5
 
 selected_mac = None
 system_active = False
 
+esp_geo_positions = {
+    "ESP_1": (54.905028, 23.966833),
+    "ESP_2": (54.905028, 23.966953),
+    "ESP_3": (54.905100, 23.966833),
+}
+
 esp_positions = {
-    "ESP_1": (0.0, 10.0),
-    "ESP_2": (-10.0, 0.0),
-    "ESP_3": (10.0, 0.0),
+    "ESP_1": (0.0, 0.0),
+    "ESP_2": (8.0, 0.0),
+    "ESP_3": (0.0, 8.0),
 }
 
 rssi_data = {}
 esp_last_seen = {}
-
 current_position = {"x": None, "y": None}
 
 data_lock = threading.Lock()
+map_inited = False
+logs = []
+
+
+def xy_to_latlon(x, y, lat0, lon0):
+    dlat = y / 111111.0
+    dlon = x / (111111.0 * math.cos(math.radians(lat0)))
+    return lat0 + dlat, lon0 + dlon
 
 
 def normalize_esp_id(esp_id):
@@ -46,8 +60,6 @@ def normalize_esp_id(esp_id):
 
 
 def udp_listener_thread():
-    global rssi_data, esp_last_seen
-
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((UDP_IP, UDP_PORT))
@@ -108,7 +120,8 @@ def add_log(text: str):
 
 
 def start_system():
-        # --- ESP COUNT CHECK ---
+    global selected_mac, system_active
+
     active_esp = 0
     now = time.time()
 
@@ -121,8 +134,6 @@ def start_system():
     if active_esp < 3:
         add_log("Nepakanka ESP mazgų trilateracijai (reikia bent 3)")
         return
-
-    global selected_mac, system_active
 
     mac = mac_input.value.strip().lower()
 
@@ -142,14 +153,12 @@ def start_system():
 
     add_log(f"Pasirinktas MAC: {selected_mac.upper()}")
     add_log("Sistema paleista")
-    update_plot()
 
 
 def stop_system():
     global system_active
 
     system_active = False
-
     current_position["x"] = None
     current_position["y"] = None
 
@@ -158,11 +167,19 @@ def stop_system():
 
     x_label.set_text("X: -")
     y_label.set_text("Y: -")
+    lat_label.set_text("Lat: -")
+    lon_label.set_text("Lon: -")
 
     for esp_id in esp_positions.keys():
         rssi_labels[esp_id].set_text(f"{esp_id}: nėra duomenų")
 
-    update_plot()
+    ui.run_javascript("""
+        if (window.obj_marker && window.leaflet_map) {
+            window.leaflet_map.removeLayer(window.obj_marker);
+            window.obj_marker = null;
+        }
+    """)
+
     add_log("Sistema sustabdyta")
 
 
@@ -213,14 +230,34 @@ def calculate_position(rssi_values):
             r1, r2, r3,
         )
 
-        x = max(-12, min(12, x))
-        y = max(-2, min(12, y))
+        x = max(-5, min(15, x))
+        y = max(-5, min(15, y))
 
         return x, y
 
     except Exception as e:
         print("Trilateration error:", e)
         return None
+
+
+def update_object_marker(lat, lon):
+    ui.run_javascript(f"""
+        if (!window.leaflet_map || typeof L === 'undefined') {{
+            return;
+        }}
+
+        if (!window.obj_marker) {{
+            window.obj_marker = L.circleMarker([{lat}, {lon}], {{
+                radius: 12,
+                color: 'white',
+                fillColor: '#3b82f6',
+                fillOpacity: 1,
+                weight: 3
+            }}).addTo(window.leaflet_map).bindPopup('Objektas');
+        }} else {{
+            window.obj_marker.setLatLng([{lat}, {lon}]);
+        }}
+    """)
 
 
 def update_dashboard():
@@ -237,23 +274,8 @@ def update_dashboard():
         else:
             rssi_labels[esp_id].set_text(f"{esp_id}: {value} dBm")
 
-    # --- HOTSPOT DISCONNECT CHECK ---
-    if selected_mac:
-        last_seen_times = []
-        with data_lock:
-            for esp_id in esp_positions.keys():
-                entry = rssi_data.get(esp_id, {}).get(selected_mac)
-                if entry:
-                    last_seen_times.append(entry["time"])
-
-        if last_seen_times:
-            if time.time() - max(last_seen_times) > 3:
-                add_log("Lokalizuojamas įrenginys atsijungė")
-                stop_system()
-                return
-
-        # --- ESP DISCONNECT CHECK ---
     now = time.time()
+
     with data_lock:
         for esp_id in esp_positions.keys():
             last_seen = esp_last_seen.get(esp_id)
@@ -262,97 +284,114 @@ def update_dashboard():
                 stop_system()
                 return
 
+    last_seen_times = []
+    with data_lock:
+        for esp_id in esp_positions.keys():
+            entry = rssi_data.get(esp_id, {}).get(selected_mac)
+            if entry:
+                last_seen_times.append(entry["time"])
+
+    if last_seen_times and now - max(last_seen_times) > TARGET_TIMEOUT:
+        add_log("Lokalizuojamas įrenginys nebeaptinkamas")
+        stop_system()
+        return
+
     pos = calculate_position(selected_rssi)
 
     if pos:
         current_position["x"] = pos[0]
         current_position["y"] = pos[1]
 
+        lat0, lon0 = esp_geo_positions["ESP_1"]
+        lat, lon = xy_to_latlon(pos[0], pos[1], lat0, lon0)
+
         x_label.set_text(f"X: {pos[0]:.2f} m")
         y_label.set_text(f"Y: {pos[1]:.2f} m")
+        lat_label.set_text(f"Lat: {lat:.6f}")
+        lon_label.set_text(f"Lon: {lon:.6f}")
 
-        # --- SERVER DATA FLOW CHECK ---
-    any_data = False
-    with data_lock:
-        for esp_id in rssi_data.keys():
-            if rssi_data[esp_id]:
-                any_data = True
-                break
-
-    if not any_data:
-        add_log("Serveris negauna duomenų iš ESP mazgų")
-
-        # --- DIAGNOSTICS ---
-    if selected_rssi:
-        add_log(f"RSSI: {selected_rssi}")
-    if current_position["x"] is not None:
-        add_log(f"Pozicija: ({current_position['x']:.2f}, {current_position['y']:.2f})")
-    update_plot()
+        update_object_marker(lat, lon)
 
 
-def update_plot():
-    plot_container.clear()
+def init_map():
+    global map_inited
 
-    with plot_container:
-        with ui.pyplot(figsize=(6, 6)).classes("w-full h-[560px]") as plot:
-            ax = plot.fig.gca()
+    if map_inited:
+        return
 
-            ax.set_facecolor("#1e293b")
-            ax.set_xlim(-12, 12)
-            ax.set_ylim(-2, 12)
-            ax.grid(color="#334155")
-            ax.set_xlabel("X, m")
-            ax.set_ylabel("Y, m")
+    map_inited = True
 
-            for name, (x, y) in esp_positions.items():
-                ax.scatter(
-                    x, y,
-                    s=120,
-                    c="#22c55e",
-                    edgecolors="white",
-                    linewidths=1.5,
-                    zorder=5,
-                )
+    lat0, lon0 = esp_geo_positions["ESP_1"]
 
-                ax.text(
-                    x, y + 0.3,
-                    name,
-                    color="white",
-                    fontsize=10,
-                    ha="center",
-                    zorder=6,
-                )
+    ui.run_javascript(f"""
+        if (typeof L === 'undefined') {{
+            console.error('Leaflet not loaded');
+        }} else {{
+            window.leaflet_map = L.map('map', {{
+                zoomControl: true,
+                preferCanvas: true
+            }}).setView([{lat0}, {lon0}], 21);
 
-            if (
-                system_active
-                and selected_mac
-                and current_position["x"] is not None
-                and current_position["y"] is not None
-            ):
-                ax.scatter(
-                    current_position["x"],
-                    current_position["y"],
-                    s=260,
-                    c="#3b82f6",
-                    edgecolors="white",
-                    linewidths=2.0,
-                    zorder=20,
-                )
+            L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+                maxNativeZoom: 19,
+                maxZoom: 22,
+                minZoom: 18,
+                updateWhenIdle: false,
+                updateWhenZooming: true,
+                keepBuffer: 4
+            }}).addTo(window.leaflet_map);
 
-                ax.text(
-                    current_position["x"],
-                    current_position["y"] + 0.5,
-                    "Objektas",
-                    color="white",
-                    fontsize=11,
-                    ha="center",
-                    zorder=21,
-                )
+            window.esp_markers = {{}};
+            window.obj_marker = null;
+
+            const bounds = L.latLngBounds([
+                [54.905028, 23.966833],
+                [54.905028, 23.966953],
+                [54.905100, 23.966833]
+            ]);
+
+            window.leaflet_map.fitBounds(bounds.pad(2.0));
+
+            setTimeout(() => window.leaflet_map.invalidateSize(true), 300);
+            setTimeout(() => window.leaflet_map.invalidateSize(true), 1000);
+            setTimeout(() => window.leaflet_map.invalidateSize(true), 2000);
+        }}
+    """)
+
+
+def refresh_map_size():
+    ui.run_javascript("""
+        if (window.leaflet_map) {
+            window.leaflet_map.invalidateSize(true);
+        }
+    """)
+
+
+def update_esp_markers():
+    for esp_id, (lat, lon) in esp_geo_positions.items():
+        ui.run_javascript(f"""
+            if (window.leaflet_map && typeof L !== 'undefined') {{
+                if (!window.esp_markers['{esp_id}']) {{
+                    window.esp_markers['{esp_id}'] = L.circleMarker([{lat}, {lon}], {{
+                        radius: 8,
+                        color: 'white',
+                        fillColor: '#22c55e',
+                        fillOpacity: 1,
+                        weight: 2
+                    }}).addTo(window.leaflet_map).bindPopup('{esp_id}');
+                }} else {{
+                    window.esp_markers['{esp_id}'].setLatLng([{lat}, {lon}]);
+                }}
+            }}
+        """)
 
 
 ui.colors(primary="#3b82f6")
 
 ui.add_head_html("""
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
 <style>
 body {
     background-color: #0f172a;
@@ -365,10 +404,13 @@ body {
     padding: 12px;
     border-radius: 8px;
 }
+#map {
+    width: 100%;
+    height: 560px;
+    background-color: #0f172a;
+}
 </style>
 """)
-
-logs = []
 
 with ui.row().classes("w-full h-screen p-4 gap-4"):
 
@@ -396,12 +438,16 @@ with ui.row().classes("w-full h-screen p-4 gap-4"):
             ui.label("Apskaičiuota pozicija").classes("font-bold text-lg")
             x_label = ui.label("X: -")
             y_label = ui.label("Y: -")
+            lat_label = ui.label("Lat: -")
+            lon_label = ui.label("Lon: -")
 
     with ui.column().classes("flex-1"):
 
-        ui.label("2D lokalizavimo laukas").classes("text-xl font-bold mb-2 text-blue-300")
+        ui.label("GPS žemėlapis").classes("text-xl font-bold mb-2 text-blue-300")
 
-        plot_container = ui.column().classes("w-full h-[560px]")
+        map_container = ui.element("div").props("id=map").classes(
+            "w-full h-[560px] rounded-md border border-slate-600"
+        )
 
         with ui.row().classes("w-full justify-center gap-6 mt-4"):
             start_button = ui.button("START", on_click=start_system).classes("bg-green-600 px-10 text-white")
@@ -416,7 +462,6 @@ with ui.row().classes("w-full h-screen p-4 gap-4"):
                     stop_button.disable()
 
             ui.timer(0.2, update_buttons)
-
 
     with ui.column().classes("w-80 gap-4"):
 
@@ -442,10 +487,12 @@ def start_background_tasks():
         thread.start()
 
         add_log(f"UDP listener paleistas: {UDP_PORT}")
-        update_plot()
 
 
 ui.timer(0.1, start_background_tasks, once=True)
+ui.timer(1.0, init_map, once=True)
+ui.timer(1.5, update_esp_markers)
+ui.timer(3.0, refresh_map_size)
 ui.timer(0.5, update_esp_statuses)
 ui.timer(0.5, update_dashboard)
 
