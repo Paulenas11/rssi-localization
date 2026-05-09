@@ -119,6 +119,49 @@ def add_log(text: str):
             ui.label(item).classes("text-sm")
 
 
+def auto_select_mac():
+    now = time.time()
+    candidates = {}
+
+    with data_lock:
+        for esp_id in esp_positions.keys():
+            for mac, entry in rssi_data.get(esp_id, {}).items():
+                if now - entry["time"] > TARGET_TIMEOUT:
+                    continue
+
+                if mac not in candidates:
+                    candidates[mac] = {
+                        "esp_count": 0,
+                        "rssi_sum": 0,
+                        "latest_time": 0,
+                    }
+
+                candidates[mac]["esp_count"] += 1
+                candidates[mac]["rssi_sum"] += entry["rssi"]
+                candidates[mac]["latest_time"] = max(candidates[mac]["latest_time"], entry["time"])
+
+    if not candidates:
+        return None
+
+    seen_by_all = {
+        mac: stats
+        for mac, stats in candidates.items()
+        if stats["esp_count"] >= 3
+    }
+    source = seen_by_all or candidates
+
+    best_mac, _ = max(
+        source.items(),
+        key=lambda item: (
+            item[1]["esp_count"],
+            item[1]["rssi_sum"] / item[1]["esp_count"],
+            item[1]["latest_time"],
+        ),
+    )
+
+    return best_mac
+
+
 def start_system():
     global selected_mac, system_active
 
@@ -135,10 +178,10 @@ def start_system():
         add_log("Nepakanka ESP mazgų trilateracijai (reikia bent 3)")
         return
 
-    mac = mac_input.value.strip().lower()
+    mac = auto_select_mac()
 
     if not mac:
-        add_log("MAC adresas neįvestas")
+        add_log("Nerasta lokalizuojamo įrenginio MAC adreso")
         return
 
     selected_mac = mac
