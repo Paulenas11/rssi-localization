@@ -11,8 +11,8 @@ from utils import rssi_to_distance, trilaterate
 UDP_IP = "0.0.0.0"
 UDP_PORT = 5005
 
-RSSI_0 = -45
-PATH_LOSS_N = 2.3
+RSSI_0 = -60
+PATH_LOSS_N = 2
 ESP_TIMEOUT = 8
 TARGET_TIMEOUT = 5
 
@@ -181,7 +181,6 @@ def start_system():
     mac = auto_select_mac()
 
     if not mac:
-        add_log("Nerasta lokalizuojamo įrenginio MAC adreso")
         return
 
     selected_mac = mac
@@ -194,8 +193,8 @@ def start_system():
     status_label.set_text("STATUS: ACTIVE")
     status_label.classes(replace="text-sm font-bold text-green-400")
 
-    add_log(f"Pasirinktas MAC: {selected_mac.upper()}")
-    add_log("Sistema paleista")
+    add_log(f"MAC: {selected_mac.upper()}")
+    add_log("System running")
 
 
 def stop_system():
@@ -313,7 +312,7 @@ def update_dashboard():
         value = selected_rssi.get(esp_id)
 
         if value is None:
-            rssi_labels[esp_id].set_text(f"{esp_id}: nėra duomenų")
+            rssi_labels[esp_id].set_text(f"{esp_id}: no data")
         else:
             rssi_labels[esp_id].set_text(f"{esp_id}: {value} dBm")
 
@@ -323,7 +322,7 @@ def update_dashboard():
         for esp_id in esp_positions.keys():
             last_seen = esp_last_seen.get(esp_id)
             if not last_seen or now - last_seen > ESP_TIMEOUT:
-                add_log(f"{esp_id} neatsako. Trilateracija sustabdyta.")
+                add_log(f"{esp_id} is not responding. Trilateration stopped.")
                 stop_system()
                 return
 
@@ -335,7 +334,7 @@ def update_dashboard():
                 last_seen_times.append(entry["time"])
 
     if last_seen_times and now - max(last_seen_times) > TARGET_TIMEOUT:
-        add_log("Lokalizuojamas įrenginys nebeaptinkamas")
+        add_log("Localized device is no longer detected.")
         stop_system()
         return
 
@@ -459,26 +458,26 @@ with ui.row().classes("w-full h-screen p-4 gap-4"):
 
     with ui.column().classes("w-64 gap-4"):
 
-        selected_mac_label = ui.label("MAC: nepasirinktas").classes("text-sm font-bold text-blue-400")
+        selected_mac_label = ui.label("MAC: ").classes("text-sm font-bold text-blue-400")
         status_label = ui.label("STATUS: STOPPED").classes("text-sm font-bold text-red-400")
 
         with ui.element("div").classes("card-clean w-full"):
-            ui.label("Mazgų būsena").classes("font-bold text-lg mb-1")
+            ui.label("Node status").classes("font-bold text-lg mb-1")
 
             esp_status_labels = {}
             for esp_id in esp_positions.keys():
                 esp_status_labels[esp_id] = ui.label(f"{esp_id}: OFFLINE").classes("text-red-400")
 
         with ui.element("div").classes("card-clean w-full"):
-            ui.label("RSSI duomenys").classes("font-bold text-lg mb-1")
+            ui.label("RSSI data").classes("font-bold text-lg mb-1")
 
             rssi_labels = {}
             for esp_id in esp_positions.keys():
-                rssi_labels[esp_id] = ui.label(f"{esp_id}: nėra duomenų")
+                rssi_labels[esp_id] = ui.label(f"{esp_id}: no data")
 
             ui.separator().classes("my-2")
 
-            ui.label("Apskaičiuota pozicija").classes("font-bold text-lg")
+            ui.label("Calculated position").classes("font-bold text-lg")
             x_label = ui.label("X: -")
             y_label = ui.label("Y: -")
             lat_label = ui.label("Lat: -")
@@ -486,7 +485,7 @@ with ui.row().classes("w-full h-screen p-4 gap-4"):
 
     with ui.column().classes("flex-1"):
 
-        ui.label("GPS žemėlapis").classes("text-xl font-bold mb-2 text-blue-300")
+        ui.label("Positioning System Map").classes("text-xl font-bold mb-2 text-blue-300")
 
         map_container = ui.element("div").props("id=map").classes(
             "w-full h-[560px] rounded-md border border-slate-600"
@@ -509,7 +508,7 @@ with ui.row().classes("w-full h-screen p-4 gap-4"):
     with ui.column().classes("w-80 gap-4"):
 
         with ui.element("div").classes("card-clean w-full h-[500px]"):
-            ui.label("Įvykiai").classes("font-bold text-lg mb-1")
+            ui.label("Events").classes("font-bold text-lg mb-1")
             log_container = ui.column().classes("gap-1")
 
 
@@ -525,7 +524,7 @@ def start_background_tasks():
         thread = threading.Thread(target=udp_listener_thread, daemon=True)
         thread.start()
 
-        add_log(f"UDP listener paleistas: {UDP_PORT}")
+        add_log(f"UDP listener started: {UDP_PORT}")
 
 
 ui.timer(0.1, start_background_tasks, once=True)
