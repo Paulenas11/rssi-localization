@@ -36,7 +36,6 @@ esp_last_seen = {}
 current_position = {"x": None, "y": None}
 
 data_lock = threading.Lock()
-map_inited = False
 logs = []
 
 
@@ -110,15 +109,11 @@ def udp_listener_thread():
 
 def add_log(text: str):
     timestamp = time.strftime("%H:%M:%S")
-    logs.insert(0, f"[{timestamp}] {text}")
+    with data_lock:
+        logs.insert(0, f"[{timestamp}] {text}")
 
-    if len(logs) > 14:
-        logs.pop()
-
-    log_container.clear()
-    with log_container:
-        for item in logs:
-            ui.label(item).classes("text-sm")
+        if len(logs) > 14:
+            logs.pop()
 
 
 def auto_select_mac():
@@ -202,34 +197,13 @@ def get_mac_options():
     return options
 
 
-def select_mac(event):
+def select_mac_value(mac):
     global selected_mac
 
-    selected_mac = event.value
-
-    if selected_mac:
-        selected_mac_label.set_text(f"MAC: {selected_mac.upper()}")
-    else:
-        selected_mac_label.set_text("MAC: Not selected")
+    selected_mac = mac
 
 
-def update_mac_select():
-    if system_active:
-        return
-
-    options = get_mac_options()
-    current_value = mac_select.value
-
-    mac_select.options = options
-
-    if current_value not in options:
-        mac_select.value = None
-        select_mac(type("Event", (), {"value": None})())
-
-    mac_select.update()
-
-
-def start_system():
+def start_system(mac=None):
     global selected_mac, system_active
 
     active_esp = 0
@@ -245,7 +219,7 @@ def start_system():
         add_log("Not enough active nodes for trilateration")
         return
 
-    mac = mac_select.value or selected_mac or auto_select_mac()
+    mac = mac or selected_mac or auto_select_mac()
 
     if not mac:
         add_log("No MAC address selected for positioning")
@@ -253,7 +227,7 @@ def start_system():
 
     selected_mac = mac
 
-    if len(get_selected_rssi()) < 3:
+    if len(get_rssi_for_mac(selected_mac)) < 3:
         add_log("Selected MAC not visible from at least 3 nodes")
         return
 
@@ -262,73 +236,37 @@ def start_system():
     current_position["x"] = None
     current_position["y"] = None
 
-    selected_mac_label.set_text(f"MAC: {selected_mac.upper()}")
-    mac_select.value = selected_mac
-    mac_select.update()
-    status_label.set_text("STATUS: ACTIVE")
-    status_label.classes(replace="text-sm font-bold text-green-400")
-
     add_log(f"MAC: {selected_mac.upper()}")
     add_log("System running")
 
 
-def stop_system():
+def stop_system(add_message=True):
     global system_active
 
     system_active = False
     current_position["x"] = None
     current_position["y"] = None
 
-    status_label.set_text("STATUS: STOPPED")
-    status_label.classes(replace="text-sm font-bold text-red-400")
-
-    x_label.set_text("X: -")
-    y_label.set_text("Y: -")
-    lat_label.set_text("Lat: -")
-    lon_label.set_text("Lon: -")
-
-    for esp_id in esp_positions.keys():
-        rssi_labels[esp_id].set_text(f"{esp_id}: no data")
-
-    ui.run_javascript("""
-        if (window.obj_marker && window.leaflet_map) {
-            window.leaflet_map.removeLayer(window.obj_marker);
-            window.obj_marker = null;
-        }
-    """)
-
-    add_log("System stopped")
+    if add_message:
+        add_log("System stopped")
 
 
-def update_esp_statuses():
-    now = time.time()
-
-    with data_lock:
-        last_seen_copy = dict(esp_last_seen)
-
-    for esp_id in esp_positions.keys():
-        last_seen = last_seen_copy.get(esp_id)
-
-        if last_seen and now - last_seen < ESP_TIMEOUT:
-            esp_status_labels[esp_id].set_text(f"{esp_id}: ACTIVE")
-            esp_status_labels[esp_id].classes(replace="text-green-400")
-        else:
-            esp_status_labels[esp_id].set_text(f"{esp_id}: OFFLINE")
-            esp_status_labels[esp_id].classes(replace="text-red-400")
-
-
-def get_selected_rssi():
-    if not selected_mac:
+def get_rssi_for_mac(mac):
+    if not mac:
         return {}
 
     result = {}
 
     with data_lock:
         for esp_id in esp_positions.keys():
-            if selected_mac in rssi_data.get(esp_id, {}):
-                result[esp_id] = rssi_data[esp_id][selected_mac]["rssi"]
+            if mac in rssi_data.get(esp_id, {}):
+                result[esp_id] = rssi_data[esp_id][mac]["rssi"]
 
     return result
+
+
+def get_selected_rssi():
+    return get_rssi_for_mac(selected_mac)
 
 
 def calculate_position(rssi_values):
@@ -377,19 +315,11 @@ def update_object_marker(lat, lon):
     """)
 
 
-def update_dashboard():
+def update_position_state():
     if not system_active or not selected_mac:
-        return
+        return None
 
     selected_rssi = get_selected_rssi()
-
-    for esp_id in esp_positions.keys():
-        value = selected_rssi.get(esp_id)
-
-        if value is None:
-            rssi_labels[esp_id].set_text(f"{esp_id}: no data")
-        else:
-            rssi_labels[esp_id].set_text(f"{esp_id}: {value} dBm")
 
     now = time.time()
 
@@ -398,8 +328,8 @@ def update_dashboard():
             last_seen = esp_last_seen.get(esp_id)
             if not last_seen or now - last_seen > ESP_TIMEOUT:
                 add_log(f"{esp_id} is not responding. Trilateration stopped.")
-                stop_system()
-                return
+                stop_system(add_message=False)
+                return None
 
     last_seen_times = []
     with data_lock:
@@ -410,8 +340,8 @@ def update_dashboard():
 
     if last_seen_times and now - max(last_seen_times) > TARGET_TIMEOUT:
         add_log("Localized device is no longer detected.")
-        stop_system()
-        return
+        stop_system(add_message=False)
+        return None
 
     pos = calculate_position(selected_rssi)
 
@@ -422,27 +352,19 @@ def update_dashboard():
         lat0, lon0 = esp_geo_positions["ESP_1"]
         lat, lon = xy_to_latlon(pos[0], pos[1], lat0, lon0)
 
-        x_label.set_text(f"X: {pos[0]:.2f} m")
-        y_label.set_text(f"Y: {pos[1]:.2f} m")
-        lat_label.set_text(f"Lat: {lat:.6f}")
-        lon_label.set_text(f"Lon: {lon:.6f}")
+        return pos[0], pos[1], lat, lon
 
-        update_object_marker(lat, lon)
+    return None
 
 
 def init_map():
-    global map_inited
-
-    if map_inited:
-        return
-
-    map_inited = True
-
     lat0, lon0 = esp_geo_positions["ESP_1"]
 
     ui.run_javascript(f"""
         if (typeof L === 'undefined') {{
             console.error('Leaflet not loaded');
+        }} else if (window.leaflet_map) {{
+            window.leaflet_map.invalidateSize(true);
         }} else {{
             window.leaflet_map = L.map('map', {{
                 zoomControl: true,
@@ -503,8 +425,6 @@ def update_esp_markers():
         """)
 
 
-ui.colors(primary="#3b82f6")
-
 ui.add_head_html("""
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -527,70 +447,7 @@ body {
     background-color: #0f172a;
 }
 </style>
-""")
-
-with ui.row().classes("w-full h-screen p-4 gap-4"):
-
-    with ui.column().classes("w-64 gap-4"):
-
-        selected_mac_label = ui.label("MAC: nepasirinktas").classes("text-sm font-bold text-blue-400")
-        status_label = ui.label("STATUS: STOPPED").classes("text-sm font-bold text-red-400")
-
-        mac_select = ui.select(
-            options={},
-            label="Lokalizuojamas įrenginys",
-            on_change=select_mac,
-        ).props("dense outlined").classes("w-full")
-
-        with ui.element("div").classes("card-clean w-full"):
-            ui.label("Node status").classes("font-bold text-lg mb-1")
-
-            esp_status_labels = {}
-            for esp_id in esp_positions.keys():
-                esp_status_labels[esp_id] = ui.label(f"{esp_id}: OFFLINE").classes("text-red-400")
-
-        with ui.element("div").classes("card-clean w-full"):
-            ui.label("RSSI data").classes("font-bold text-lg mb-1")
-
-            rssi_labels = {}
-            for esp_id in esp_positions.keys():
-                rssi_labels[esp_id] = ui.label(f"{esp_id}: no data")
-
-            ui.separator().classes("my-2")
-
-            ui.label("Calculated position").classes("font-bold text-lg")
-            x_label = ui.label("X: -")
-            y_label = ui.label("Y: -")
-            lat_label = ui.label("Lat: -")
-            lon_label = ui.label("Lon: -")
-
-    with ui.column().classes("flex-1"):
-
-        ui.label("Positioning System Map").classes("text-xl font-bold mb-2 text-blue-300")
-
-        map_container = ui.element("div").props("id=map").classes(
-            "w-full h-[560px] rounded-md border border-slate-600"
-        )
-
-        with ui.row().classes("w-full justify-center gap-6 mt-4"):
-            start_button = ui.button("START", on_click=start_system).classes("bg-green-600 px-10 text-white")
-            stop_button = ui.button("STOP", on_click=stop_system).classes("bg-red-600 px-10 text-white")
-
-            def update_buttons():
-                if system_active:
-                    start_button.disable()
-                    stop_button.enable()
-                else:
-                    start_button.enable()
-                    stop_button.disable()
-
-            ui.timer(0.2, update_buttons)
-
-    with ui.column().classes("w-80 gap-4"):
-
-        with ui.element("div").classes("card-clean w-full h-[500px]"):
-            ui.label("Events").classes("font-bold text-lg mb-1")
-            log_container = ui.column().classes("gap-1")
+""", shared=True)
 
 
 listener_started = False
@@ -608,12 +465,184 @@ def start_background_tasks():
         add_log(f"UDP listener started: {UDP_PORT}")
 
 
-ui.timer(0.1, start_background_tasks, once=True)
-ui.timer(1.0, init_map, once=True)
-ui.timer(1.5, update_esp_markers)
-ui.timer(3.0, refresh_map_size)
-ui.timer(0.5, update_esp_statuses)
-ui.timer(0.5, update_mac_select)
-ui.timer(0.5, update_dashboard)
+start_background_tasks()
 
-ui.run(host="0.0.0.0", port=8080, reload=False)
+
+@ui.page("/")
+def index():
+    with ui.row().classes("w-full h-screen p-4 gap-4"):
+
+        with ui.column().classes("w-64 gap-4"):
+
+            selected_mac_label = ui.label("MAC: nepasirinktas").classes("text-sm font-bold text-blue-400")
+            status_label = ui.label("STATUS: STOPPED").classes("text-sm font-bold text-red-400")
+
+            mac_select = ui.select(
+                options={},
+                label="Lokalizuojamas įrenginys",
+                on_change=lambda event: select_mac_value(event.value),
+            ).props("dense outlined").classes("w-full")
+
+            with ui.element("div").classes("card-clean w-full"):
+                ui.label("Node status").classes("font-bold text-lg mb-1")
+
+                esp_status_labels = {}
+                for esp_id in esp_positions.keys():
+                    esp_status_labels[esp_id] = ui.label(f"{esp_id}: OFFLINE").classes("text-red-400")
+
+            with ui.element("div").classes("card-clean w-full"):
+                ui.label("RSSI data").classes("font-bold text-lg mb-1")
+
+                rssi_labels = {}
+                for esp_id in esp_positions.keys():
+                    rssi_labels[esp_id] = ui.label(f"{esp_id}: no data")
+
+                ui.separator().classes("my-2")
+
+                ui.label("Calculated position").classes("font-bold text-lg")
+                x_label = ui.label("X: -")
+                y_label = ui.label("Y: -")
+                lat_label = ui.label("Lat: -")
+                lon_label = ui.label("Lon: -")
+
+        with ui.column().classes("flex-1"):
+
+            ui.label("Positioning System Map").classes("text-xl font-bold mb-2 text-blue-300")
+
+            ui.element("div").props("id=map").classes(
+                "w-full h-[560px] rounded-md border border-slate-600"
+            )
+
+            with ui.row().classes("w-full justify-center gap-6 mt-4"):
+                start_button = ui.button("START").classes("bg-green-600 px-10 text-white")
+                stop_button = ui.button("STOP").classes("bg-red-600 px-10 text-white")
+
+        with ui.column().classes("w-80 gap-4"):
+
+            with ui.element("div").classes("card-clean w-full h-[500px]"):
+                ui.label("Events").classes("font-bold text-lg mb-1")
+                log_container = ui.column().classes("gap-1")
+
+    def update_selected_label():
+        if selected_mac:
+            selected_mac_label.set_text(f"MAC: {selected_mac.upper()}")
+        else:
+            selected_mac_label.set_text("MAC: nepasirinktas")
+
+    def remove_object_marker():
+        ui.run_javascript("""
+            if (window.obj_marker && window.leaflet_map) {
+                window.leaflet_map.removeLayer(window.obj_marker);
+                window.obj_marker = null;
+            }
+        """)
+
+    def handle_start():
+        start_system(mac_select.value)
+        update_selected_label()
+        update_page_state()
+
+    def handle_stop():
+        stop_system()
+        remove_object_marker()
+        update_page_state()
+
+    start_button.on_click(handle_start)
+    stop_button.on_click(handle_stop)
+
+    def update_buttons():
+        if system_active:
+            start_button.disable()
+            stop_button.enable()
+        else:
+            start_button.enable()
+            stop_button.disable()
+
+    def update_mac_select():
+        if system_active:
+            return
+
+        options = get_mac_options()
+        current_value = mac_select.value or selected_mac
+
+        mac_select.options = options
+
+        if current_value in options:
+            mac_select.value = current_value
+        elif not selected_mac:
+            mac_select.value = None
+
+        mac_select.update()
+
+    def update_esp_statuses():
+        now = time.time()
+
+        with data_lock:
+            last_seen_copy = dict(esp_last_seen)
+
+        for esp_id in esp_positions.keys():
+            last_seen = last_seen_copy.get(esp_id)
+
+            if last_seen and now - last_seen < ESP_TIMEOUT:
+                esp_status_labels[esp_id].set_text(f"{esp_id}: ACTIVE")
+                esp_status_labels[esp_id].classes(replace="text-green-400")
+            else:
+                esp_status_labels[esp_id].set_text(f"{esp_id}: OFFLINE")
+                esp_status_labels[esp_id].classes(replace="text-red-400")
+
+    def update_logs():
+        with data_lock:
+            log_items = list(logs)
+
+        log_container.clear()
+        with log_container:
+            for item in log_items:
+                ui.label(item).classes("text-sm")
+
+    def update_page_state():
+        update_selected_label()
+
+        if system_active:
+            status_label.set_text("STATUS: ACTIVE")
+            status_label.classes(replace="text-sm font-bold text-green-400")
+        else:
+            status_label.set_text("STATUS: STOPPED")
+            status_label.classes(replace="text-sm font-bold text-red-400")
+
+        selected_rssi = get_selected_rssi()
+        for esp_id in esp_positions.keys():
+            value = selected_rssi.get(esp_id)
+
+            if value is None:
+                rssi_labels[esp_id].set_text(f"{esp_id}: no data")
+            else:
+                rssi_labels[esp_id].set_text(f"{esp_id}: {value} dBm")
+
+        position = update_position_state()
+
+        if position:
+            x, y, lat, lon = position
+            x_label.set_text(f"X: {x:.2f} m")
+            y_label.set_text(f"Y: {y:.2f} m")
+            lat_label.set_text(f"Lat: {lat:.6f}")
+            lon_label.set_text(f"Lon: {lon:.6f}")
+            update_object_marker(lat, lon)
+        elif not system_active:
+            x_label.set_text("X: -")
+            y_label.set_text("Y: -")
+            lat_label.set_text("Lat: -")
+            lon_label.set_text("Lon: -")
+            remove_object_marker()
+
+        update_buttons()
+        update_logs()
+
+    ui.timer(0.2, update_buttons)
+    ui.timer(1.0, init_map)
+    ui.timer(1.5, update_esp_markers)
+    ui.timer(3.0, refresh_map_size)
+    ui.timer(0.5, update_esp_statuses)
+    ui.timer(0.5, update_mac_select)
+    ui.timer(0.5, update_page_state)
+
+ui.run(host="0.0.0.0", port=8080, reload=False, show=False)
