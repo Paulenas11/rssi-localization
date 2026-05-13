@@ -13,8 +13,8 @@ UDP_PORT = 5005
 
 RSSI_0 = -60
 PATH_LOSS_N = 2
-ESP_TIMEOUT = 8
-TARGET_TIMEOUT = 5
+ESP_TIMEOUT = 15
+TARGET_TIMEOUT = 10
 
 selected_mac = None
 system_active = False
@@ -97,11 +97,13 @@ def udp_listener_thread():
 
             for entry in msg:
                 mac = entry.get("mac", "").lower()
+                ssid = entry.get("ssid", "")
                 rssi = entry.get("rssi", None)
 
                 if mac and rssi is not None:
                     rssi_data[esp_id][mac] = {
                         "rssi": int(rssi),
+                        "ssid": ssid,
                         "time": time.time(),
                     }
 
@@ -162,6 +164,71 @@ def auto_select_mac():
     return best_mac
 
 
+def get_mac_options():
+    now = time.time()
+    candidates = {}
+
+    with data_lock:
+        for esp_id in esp_positions.keys():
+            for mac, entry in rssi_data.get(esp_id, {}).items():
+                if now - entry["time"] > TARGET_TIMEOUT:
+                    continue
+
+                if mac not in candidates:
+                    candidates[mac] = {
+                        "esp_count": 0,
+                        "rssi_sum": 0,
+                        "ssids": set(),
+                    }
+
+                candidates[mac]["esp_count"] += 1
+                candidates[mac]["rssi_sum"] += entry["rssi"]
+
+                if entry.get("ssid"):
+                    candidates[mac]["ssids"].add(entry["ssid"])
+
+    options = {}
+    for mac, stats in sorted(
+        candidates.items(),
+        key=lambda item: (-item[1]["esp_count"], item[0]),
+    ):
+        avg_rssi = stats["rssi_sum"] / stats["esp_count"]
+        ssid_text = ", ".join(sorted(stats["ssids"])) or "be SSID"
+        options[mac] = (
+            f"{ssid_text} | {mac.upper()} | "
+            f"{stats['esp_count']}/{len(esp_positions)} ESP | {avg_rssi:.0f} dBm"
+        )
+
+    return options
+
+
+def select_mac(event):
+    global selected_mac
+
+    selected_mac = event.value
+
+    if selected_mac:
+        selected_mac_label.set_text(f"MAC: {selected_mac.upper()}")
+    else:
+        selected_mac_label.set_text("MAC: Not selected")
+
+
+def update_mac_select():
+    if system_active:
+        return
+
+    options = get_mac_options()
+    current_value = mac_select.value
+
+    mac_select.options = options
+
+    if current_value not in options:
+        mac_select.value = None
+        select_mac(type("Event", (), {"value": None})())
+
+    mac_select.update()
+
+
 def start_system():
     global selected_mac, system_active
 
@@ -175,21 +242,29 @@ def start_system():
                 active_esp += 1
 
     if active_esp < 3:
-        add_log("Nepakanka ESP mazgų trilateracijai (reikia bent 3)")
+        add_log("Not enough active nodes for trilateration")
         return
 
-    mac = auto_select_mac()
+    mac = mac_select.value or selected_mac or auto_select_mac()
 
     if not mac:
+        add_log("No MAC address selected for positioning")
         return
 
     selected_mac = mac
+
+    if len(get_selected_rssi()) < 3:
+        add_log("Selected MAC not visible from at least 3 nodes")
+        return
+
     system_active = True
 
     current_position["x"] = None
     current_position["y"] = None
 
     selected_mac_label.set_text(f"MAC: {selected_mac.upper()}")
+    mac_select.value = selected_mac
+    mac_select.update()
     status_label.set_text("STATUS: ACTIVE")
     status_label.classes(replace="text-sm font-bold text-green-400")
 
@@ -213,7 +288,7 @@ def stop_system():
     lon_label.set_text("Lon: -")
 
     for esp_id in esp_positions.keys():
-        rssi_labels[esp_id].set_text(f"{esp_id}: nėra duomenų")
+        rssi_labels[esp_id].set_text(f"{esp_id}: no data")
 
     ui.run_javascript("""
         if (window.obj_marker && window.leaflet_map) {
@@ -222,7 +297,7 @@ def stop_system():
         }
     """)
 
-    add_log("Sistema sustabdyta")
+    add_log("System stopped")
 
 
 def update_esp_statuses():
@@ -295,7 +370,7 @@ def update_object_marker(lat, lon):
                 fillColor: '#3b82f6',
                 fillOpacity: 1,
                 weight: 3
-            }}).addTo(window.leaflet_map).bindPopup('Objektas');
+            }}).addTo(window.leaflet_map).bindPopup('Object');
         }} else {{
             window.obj_marker.setLatLng([{lat}, {lon}]);
         }}
@@ -458,8 +533,14 @@ with ui.row().classes("w-full h-screen p-4 gap-4"):
 
     with ui.column().classes("w-64 gap-4"):
 
-        selected_mac_label = ui.label("MAC: ").classes("text-sm font-bold text-blue-400")
+        selected_mac_label = ui.label("MAC: nepasirinktas").classes("text-sm font-bold text-blue-400")
         status_label = ui.label("STATUS: STOPPED").classes("text-sm font-bold text-red-400")
+
+        mac_select = ui.select(
+            options={},
+            label="Lokalizuojamas įrenginys",
+            on_change=select_mac,
+        ).props("dense outlined").classes("w-full")
 
         with ui.element("div").classes("card-clean w-full"):
             ui.label("Node status").classes("font-bold text-lg mb-1")
@@ -532,6 +613,7 @@ ui.timer(1.0, init_map, once=True)
 ui.timer(1.5, update_esp_markers)
 ui.timer(3.0, refresh_map_size)
 ui.timer(0.5, update_esp_statuses)
+ui.timer(0.5, update_mac_select)
 ui.timer(0.5, update_dashboard)
 
 ui.run(host="0.0.0.0", port=8080, reload=False)
