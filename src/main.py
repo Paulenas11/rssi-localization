@@ -1,183 +1,447 @@
+from nicegui import ui
 import socket
 import json
-from collections import deque
-import threading
 import time
-import tkinter as tk
-from tkinter import ttk
-
-import matplotlib
-matplotlib.use("TkAgg")
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import threading
 import matplotlib.pyplot as plt
 
-from utils import trilaterate
+from utils import rssi_to_distance, trilaterate
+
 
 UDP_IP = "0.0.0.0"
-UDP_PORT = 5000
+UDP_PORT = 5005
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((UDP_IP, UDP_PORT))
-sock.setblocking(False)
+RSSI_0 = -45
+PATH_LOSS_N = 2.3
+ESP_TIMEOUT = 8
 
-windows = {
-    1: deque(maxlen=10),
-    2: deque(maxlen=10),
-    3: deque(maxlen=10)
+selected_mac = None
+system_active = False
+
+esp_positions = {
+    "ESP_1": (0.0, 10.0),
+    "ESP_2": (-10.0, 0.0),
+    "ESP_3": (10.0, 0.0),
 }
 
-AP = {
-    1: (0.6, 0),
-    2: (0, 0.5),
-    3: (-0.5, 0)
-}
+rssi_data = {}
+esp_last_seen = {}
 
-last_seen = {
-    1: 0,
-    2: 0,
-    3: 0
-}
+current_position = {"x": None, "y": None}
 
-running = False
+data_lock = threading.Lock()
 
 
-def get_ap_status_labels():
-    now = time.time()
-    statuses = []
+def normalize_esp_id(esp_id):
+    esp_id = str(esp_id).strip()
 
-    for ap_id in [1, 2, 3]:
-        if now - last_seen[ap_id] > 2:  
-            statuses.append((f"AP{ap_id}: OFF", "red"))
-        else:
-            statuses.append((f"AP{ap_id}: ON", "green"))
+    if esp_id in ("1", "ESP1", "esp1", "ID_1", "ESP_1"):
+        return "ESP_1"
+    if esp_id in ("2", "ESP2", "esp2", "ID_2", "ESP_2"):
+        return "ESP_2"
+    if esp_id in ("3", "ESP3", "esp3", "ID_3", "ESP_3"):
+        return "ESP_3"
 
-    return statuses
+    return esp_id
 
 
-def localization_loop(update_ui_callback, update_plot_callback):
-    global running
+def udp_listener_thread():
+    global rssi_data, esp_last_seen
 
-    while running:
-        try:
-            data, addr = sock.recvfrom(1024)
-        except BlockingIOError:
-            time.sleep(0.05)
-            continue
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((UDP_IP, UDP_PORT))
+
+    print("=== UDP LISTENER STARTED ===")
+    print(f"Listening on UDP port {UDP_PORT}")
+
+    while True:
+        data, addr = sock.recvfrom(4096)
 
         try:
             msg = json.loads(data.decode())
-        except:
-            update_ui_callback("-", "-", None)
+        except Exception:
+            print("Invalid JSON received")
             continue
 
-        node_id = msg.get("id")
-        rssi = msg.get("rssi")
+        if isinstance(msg, dict):
+            msg = [msg]
 
-        if node_id not in windows:
-            update_ui_callback("-", "-", None)
+        if not msg:
             continue
 
-        windows[node_id].append(rssi)
-        last_seen[node_id] = time.time()
+        raw_esp_id = msg[0].get("esp_id", msg[0].get("id", None))
+        if raw_esp_id is None:
+            print("Invalid packet, missing esp_id:", msg)
+            continue
 
-        if all(len(windows[i]) > 0 for i in [1, 2, 3]):
-            f1 = sum(windows[1]) / len(windows[1])
-            f2 = sum(windows[2]) / len(windows[2])
-            f3 = sum(windows[3]) / len(windows[3])
+        esp_id = normalize_esp_id(raw_esp_id)
 
-            d1 = abs(f1)
-            d2 = abs(f2)
-            d3 = abs(f3)
+        with data_lock:
+            esp_last_seen[esp_id] = time.time()
 
-            max_d = max(d1, d2, d3)
-            d1 /= max_d
-            d2 /= max_d
-            d3 /= max_d
+            if esp_id not in rssi_data:
+                rssi_data[esp_id] = {}
 
-            pos = trilaterate(AP[1], AP[2], AP[3], d1, d2, d3)
+            for entry in msg:
+                mac = entry.get("mac", "").lower()
+                rssi = entry.get("rssi", None)
 
-            if pos:
-                x, y = pos
-                update_ui_callback(f"{x:.2f}", f"{y:.2f}", None)
-                update_plot_callback(x, y)
-            else:
-                update_ui_callback("-", "-", None)
-
-        time.sleep(0.05)
+                if mac and rssi is not None:
+                    rssi_data[esp_id][mac] = {
+                        "rssi": int(rssi),
+                        "time": time.time(),
+                    }
 
 
-def update_ui(x, y, _):
-    coord_label.config(text=f"Coordinates: ({x}, {y})")
+def add_log(text: str):
+    timestamp = time.strftime("%H:%M:%S")
+    logs.insert(0, f"[{timestamp}] {text}")
 
-    statuses = get_ap_status_labels()
+    if len(logs) > 14:
+        logs.pop()
 
-    ap1_label.config(text=statuses[0][0], foreground=statuses[0][1])
-    ap2_label.config(text=statuses[1][0], foreground=statuses[1][1])
-    ap3_label.config(text=statuses[2][0], foreground=statuses[2][1])
+    log_container.clear()
+    with log_container:
+        for item in logs:
+            ui.label(item).classes("text-sm")
 
 
-def start_localization():
-    global running
-    if running:
+def start_system():
+        # --- ESP COUNT CHECK ---
+    active_esp = 0
+    now = time.time()
+
+    with data_lock:
+        for esp_id in esp_positions.keys():
+            last_seen = esp_last_seen.get(esp_id)
+            if last_seen and now - last_seen < ESP_TIMEOUT:
+                active_esp += 1
+
+    if active_esp < 3:
+        add_log("Nepakanka ESP mazgų trilateracijai (reikia bent 3)")
         return
-    running = True
 
-    thread = threading.Thread(
-        target=localization_loop,
-        args=(update_ui, update_plot),
-        daemon=True
-    )
-    thread.start()
+    global selected_mac, system_active
 
+    mac = mac_input.value.strip().lower()
 
-def stop_localization():
-    global running
-    running = False
+    if not mac:
+        add_log("MAC adresas neįvestas")
+        return
 
+    selected_mac = mac
+    system_active = True
 
-root = tk.Tk()
-root.title("Positioning system")
+    current_position["x"] = None
+    current_position["y"] = None
 
-start_btn = ttk.Button(root, text="Start", command=start_localization)
-stop_btn = ttk.Button(root, text="Stop", command=stop_localization)
+    selected_mac_label.set_text(f"MAC: {selected_mac.upper()}")
+    status_label.set_text("STATUS: ACTIVE")
+    status_label.classes(replace="text-sm font-bold text-green-400")
 
-coord_label = ttk.Label(root, text="Coordinates: (-, -)")
-
-ap1_label = ttk.Label(root, text="AP1: -")
-ap2_label = ttk.Label(root, text="AP2: -")
-ap3_label = ttk.Label(root, text="AP3: -")
-
-start_btn.pack(pady=5)
-stop_btn.pack(pady=5)
-coord_label.pack(pady=5)
-
-ap1_label.pack()
-ap2_label.pack()
-ap3_label.pack()
-
-fig, ax = plt.subplots(figsize=(5, 4))
-ax.set_xlim(-1, 1)
-ax.set_ylim(-0.5, 1)
-ax.set_aspect('equal')
-ax.set_title("Real-time Positioning")
-
-ax.scatter([AP[1][0], AP[2][0], AP[3][0]],
-           [AP[1][1], AP[2][1], AP[3][1]],
-           c=['red','red','red'])
-
-ax.text(AP[1][0], AP[1][1], "AP1")
-ax.text(AP[2][0], AP[2][1], "AP2")
-ax.text(AP[3][0], AP[3][1], "AP3")
-
-point, = ax.plot([], [], 'bo', markersize=10)
-
-canvas = FigureCanvasTkAgg(fig, master=root)
-canvas.get_tk_widget().pack()
+    add_log(f"Pasirinktas MAC: {selected_mac.upper()}")
+    add_log("Sistema paleista")
+    update_plot()
 
 
-def update_plot(x, y):
-    point.set_data([x], [y])
-    canvas.draw_idle()
+def stop_system():
+    global system_active
+
+    system_active = False
+
+    current_position["x"] = None
+    current_position["y"] = None
+
+    status_label.set_text("STATUS: STOPPED")
+    status_label.classes(replace="text-sm font-bold text-red-400")
+
+    x_label.set_text("X: -")
+    y_label.set_text("Y: -")
+
+    for esp_id in esp_positions.keys():
+        rssi_labels[esp_id].set_text(f"{esp_id}: nėra duomenų")
+
+    update_plot()
+    add_log("Sistema sustabdyta")
 
 
-root.mainloop()
+def update_esp_statuses():
+    now = time.time()
+
+    with data_lock:
+        last_seen_copy = dict(esp_last_seen)
+
+    for esp_id in esp_positions.keys():
+        last_seen = last_seen_copy.get(esp_id)
+
+        if last_seen and now - last_seen < ESP_TIMEOUT:
+            esp_status_labels[esp_id].set_text(f"{esp_id}: ACTIVE")
+            esp_status_labels[esp_id].classes(replace="text-green-400")
+        else:
+            esp_status_labels[esp_id].set_text(f"{esp_id}: OFFLINE")
+            esp_status_labels[esp_id].classes(replace="text-red-400")
+
+
+def get_selected_rssi():
+    if not selected_mac:
+        return {}
+
+    result = {}
+
+    with data_lock:
+        for esp_id in esp_positions.keys():
+            if selected_mac in rssi_data.get(esp_id, {}):
+                result[esp_id] = rssi_data[esp_id][selected_mac]["rssi"]
+
+    return result
+
+
+def calculate_position(rssi_values):
+    if len(rssi_values) < 3:
+        return None
+
+    try:
+        r1 = rssi_to_distance(RSSI_0, rssi_values["ESP_1"], PATH_LOSS_N)
+        r2 = rssi_to_distance(RSSI_0, rssi_values["ESP_2"], PATH_LOSS_N)
+        r3 = rssi_to_distance(RSSI_0, rssi_values["ESP_3"], PATH_LOSS_N)
+
+        x, y = trilaterate(
+            esp_positions["ESP_1"],
+            esp_positions["ESP_2"],
+            esp_positions["ESP_3"],
+            r1, r2, r3,
+        )
+
+        x = max(-12, min(12, x))
+        y = max(-2, min(12, y))
+
+        return x, y
+
+    except Exception as e:
+        print("Trilateration error:", e)
+        return None
+
+
+def update_dashboard():
+    if not system_active or not selected_mac:
+        return
+
+    selected_rssi = get_selected_rssi()
+
+    for esp_id in esp_positions.keys():
+        value = selected_rssi.get(esp_id)
+
+        if value is None:
+            rssi_labels[esp_id].set_text(f"{esp_id}: nėra duomenų")
+        else:
+            rssi_labels[esp_id].set_text(f"{esp_id}: {value} dBm")
+
+    # --- HOTSPOT DISCONNECT CHECK ---
+    if selected_mac:
+        last_seen_times = []
+        with data_lock:
+            for esp_id in esp_positions.keys():
+                entry = rssi_data.get(esp_id, {}).get(selected_mac)
+                if entry:
+                    last_seen_times.append(entry["time"])
+
+        if last_seen_times:
+            if time.time() - max(last_seen_times) > 3:
+                add_log("Lokalizuojamas įrenginys atsijungė")
+                stop_system()
+                return
+
+        # --- ESP DISCONNECT CHECK ---
+    now = time.time()
+    with data_lock:
+        for esp_id in esp_positions.keys():
+            last_seen = esp_last_seen.get(esp_id)
+            if not last_seen or now - last_seen > ESP_TIMEOUT:
+                add_log(f"{esp_id} neatsako. Trilateracija sustabdyta.")
+                stop_system()
+                return
+
+    pos = calculate_position(selected_rssi)
+
+    if pos:
+        current_position["x"] = pos[0]
+        current_position["y"] = pos[1]
+
+        x_label.set_text(f"X: {pos[0]:.2f} m")
+        y_label.set_text(f"Y: {pos[1]:.2f} m")
+
+        # --- SERVER DATA FLOW CHECK ---
+    any_data = False
+    with data_lock:
+        for esp_id in rssi_data.keys():
+            if rssi_data[esp_id]:
+                any_data = True
+                break
+
+    if not any_data:
+        add_log("Serveris negauna duomenų iš ESP mazgų")
+
+    update_plot()
+
+
+def update_plot():
+    plot_container.clear()
+
+    with plot_container:
+        with ui.pyplot(figsize=(6, 6)).classes("w-full h-[560px]") as plot:
+            ax = plot.fig.gca()
+
+            ax.set_facecolor("#1e293b")
+            ax.set_xlim(-12, 12)
+            ax.set_ylim(-2, 12)
+            ax.grid(color="#334155")
+            ax.set_xlabel("X, m")
+            ax.set_ylabel("Y, m")
+
+            for name, (x, y) in esp_positions.items():
+                ax.scatter(
+                    x, y,
+                    s=120,
+                    c="#22c55e",
+                    edgecolors="white",
+                    linewidths=1.5,
+                    zorder=5,
+                )
+
+                ax.text(
+                    x, y + 0.3,
+                    name,
+                    color="white",
+                    fontsize=10,
+                    ha="center",
+                    zorder=6,
+                )
+
+            if (
+                system_active
+                and selected_mac
+                and current_position["x"] is not None
+                and current_position["y"] is not None
+            ):
+                ax.scatter(
+                    current_position["x"],
+                    current_position["y"],
+                    s=260,
+                    c="#3b82f6",
+                    edgecolors="white",
+                    linewidths=2.0,
+                    zorder=20,
+                )
+
+                ax.text(
+                    current_position["x"],
+                    current_position["y"] + 0.5,
+                    "Objektas",
+                    color="white",
+                    fontsize=11,
+                    ha="center",
+                    zorder=21,
+                )
+
+
+ui.colors(primary="#3b82f6")
+
+ui.add_head_html("""
+<style>
+body {
+    background-color: #0f172a;
+    color: #e2e8f0;
+    font-family: Inter, sans-serif;
+}
+.card-clean {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    padding: 12px;
+    border-radius: 8px;
+}
+</style>
+""")
+
+logs = []
+
+with ui.row().classes("w-full h-screen p-4 gap-4"):
+
+    with ui.column().classes("w-64 gap-4"):
+
+        selected_mac_label = ui.label("MAC: nepasirinktas").classes("text-sm font-bold text-blue-400")
+        status_label = ui.label("STATUS: STOPPED").classes("text-sm font-bold text-red-400")
+
+        with ui.element("div").classes("card-clean w-full"):
+            ui.label("Mazgų būsena").classes("font-bold text-lg mb-1")
+
+            esp_status_labels = {}
+            for esp_id in esp_positions.keys():
+                esp_status_labels[esp_id] = ui.label(f"{esp_id}: OFFLINE").classes("text-red-400")
+
+        with ui.element("div").classes("card-clean w-full"):
+            ui.label("RSSI duomenys").classes("font-bold text-lg mb-1")
+
+            rssi_labels = {}
+            for esp_id in esp_positions.keys():
+                rssi_labels[esp_id] = ui.label(f"{esp_id}: nėra duomenų")
+
+            ui.separator().classes("my-2")
+
+            ui.label("Apskaičiuota pozicija").classes("font-bold text-lg")
+            x_label = ui.label("X: -")
+            y_label = ui.label("Y: -")
+
+    with ui.column().classes("flex-1"):
+
+        ui.label("2D lokalizavimo laukas").classes("text-xl font-bold mb-2 text-blue-300")
+
+        plot_container = ui.column().classes("w-full h-[560px]")
+
+        with ui.row().classes("w-full justify-center gap-6 mt-4"):
+            start_button = ui.button("START", on_click=start_system).classes("bg-green-600 px-10 text-white")
+            stop_button = ui.button("STOP", on_click=stop_system).classes("bg-red-600 px-10 text-white")
+
+            def update_buttons():
+                if system_active:
+                    start_button.disable()
+                    stop_button.enable()
+                else:
+                    start_button.enable()
+                    stop_button.disable()
+
+            ui.timer(0.2, update_buttons)
+
+
+    with ui.column().classes("w-80 gap-4"):
+
+        with ui.element("div").classes("card-clean w-full"):
+            ui.label("Pasirinktas objektas").classes("font-bold text-lg mb-1")
+            mac_input = ui.input("MAC adresas", placeholder="AA:BB:CC:DD:EE:FF").classes("w-full")
+
+        with ui.element("div").classes("card-clean w-full h-[500px]"):
+            ui.label("Įvykiai").classes("font-bold text-lg mb-1")
+            log_container = ui.column().classes("gap-1")
+
+
+listener_started = False
+
+
+def start_background_tasks():
+    global listener_started
+
+    if not listener_started:
+        listener_started = True
+
+        thread = threading.Thread(target=udp_listener_thread, daemon=True)
+        thread.start()
+
+        add_log(f"UDP listener paleistas: {UDP_PORT}")
+        update_plot()
+
+
+ui.timer(0.1, start_background_tasks, once=True)
+ui.timer(0.5, update_esp_statuses)
+ui.timer(0.5, update_dashboard)
+
+ui.run(host="0.0.0.0", port=8080, reload=False)
