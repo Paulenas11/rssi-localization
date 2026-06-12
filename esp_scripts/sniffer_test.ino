@@ -85,8 +85,16 @@ bool is_broadcast_mac(const uint8_t* mac) {
   return true;
 }
 
+bool is_multicast_mac(const uint8_t* mac) {
+  return (mac[0] & 0x01) != 0;
+}
+
 bool is_ap_mac(const uint8_t* mac) {
   return same_mac(mac, AP_BSSID);
+}
+
+bool is_invalid_client_mac(const uint8_t* mac) {
+  return is_empty_mac(mac) || is_broadcast_mac(mac) || is_multicast_mac(mac) || is_ap_mac(mac);
 }
 
 bool packet_belongs_to_ap(const wifi_ieee80211_mac_hdr_t* header) {
@@ -94,17 +102,17 @@ bool packet_belongs_to_ap(const wifi_ieee80211_mac_hdr_t* header) {
 }
 
 bool get_client_mac(const wifi_ieee80211_mac_hdr_t* header, uint8_t* client_mac) {
-  if (is_ap_mac(header->addr1) && !is_ap_mac(header->addr2)) {
+  if (is_ap_mac(header->addr1) && !is_invalid_client_mac(header->addr2)) {
     copy_mac(client_mac, header->addr2);
     return true;
   }
 
-  if (is_ap_mac(header->addr2) && !is_ap_mac(header->addr1)) {
+  if (is_ap_mac(header->addr2) && !is_invalid_client_mac(header->addr1)) {
     copy_mac(client_mac, header->addr1);
     return true;
   }
 
-  if (is_ap_mac(header->addr3) && !is_ap_mac(header->addr2)) {
+  if (is_ap_mac(header->addr3) && !is_invalid_client_mac(header->addr2)) {
     copy_mac(client_mac, header->addr2);
     return true;
   }
@@ -113,11 +121,7 @@ bool get_client_mac(const wifi_ieee80211_mac_hdr_t* header, uint8_t* client_mac)
 }
 
 void update_device(const uint8_t* mac, int rssi) {
-  if (is_empty_mac(mac) || is_broadcast_mac(mac)) {
-    return;
-  }
-
-  if (is_ap_mac(mac)) {
+  if (is_invalid_client_mac(mac)) {
     return;
   }
 
