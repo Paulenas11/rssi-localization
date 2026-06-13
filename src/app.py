@@ -22,9 +22,9 @@ selected_mac = None
 system_active = False
 
 esp_geo_positions = {
-    "ESP_1": (54.905028, 23.966833),
-    "ESP_2": (54.905028, 23.966953),
-    "ESP_3": (54.905100, 23.966833),
+    "ESP_1": (54.90491, 23.966833),
+    "ESP_2": (54.90491, 23.966958),
+    "ESP_3": (54.904982, 23.966833),
 }
 
 esp_positions = {
@@ -930,12 +930,12 @@ def index():
             status_label.set_text("STATUS: STOPPED")
             status_label.classes(replace="text-sm font-bold text-red-400")
 
-        selected_rssi = get_selected_rssi()
+        selected_rssi = get_selected_rssi() if system_active else {}
         for esp_id in esp_positions.keys():
             value = selected_rssi.get(esp_id)
 
             if value is None:
-                rssi_labels[esp_id].set_text(f"{esp_id}: no data")
+                rssi_labels[esp_id].set_text(f"{esp_id}: -")
             else:
                 rssi_labels[esp_id].set_text(f"{esp_id}: {value} dBm")
 

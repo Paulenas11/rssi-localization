@@ -10,6 +10,7 @@ MIN_RSSI_IN_SHELTER = -75
 IGNORED_MACS = {
     "AC:A7:04:BE:5F:F8",
     "AC:A7:04:BD:3B:20",
+    "44:3E:07:1C:FB:5D",
 }
 
 devices = {}

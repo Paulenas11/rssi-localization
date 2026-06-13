@@ -26,5 +26,75 @@
       "lat": 54.904982,
       "lon": 23.966833
     }
+  },
+  "shelter": {
+    "name": "Dorm room shelter",
+    "capacity": 10,
+    "udp_port": 5005,
+    "device_timeout": 15,
+    "min_rssi_in_shelter": -75,
+    "min_nodes_in_shelter": 1,
+    "ignored_macs": [
+      "AC:A7:04:BE:5F:F8",
+      "AC:A7:04:BD:3B:20",
+      "44:3E:07:1C:FB:5D",
+      "AC:A7:04:BD:97:DC",
+      "8C:FD:49:54:AF:24"
+    ],
+    "esp_ids": [
+      "ESP_1",
+      "ESP_2",
+      "ESP_3",
+      "ESP_4"
+    ],
+    "floor_plan": {
+      "width": 7.4,
+      "height": 3.0,
+      "rooms": [
+        {
+          "name": "Room",
+          "x": 0.0,
+          "y": 0.0,
+          "width": 4.5,
+          "height": 2.85
+        },
+        {
+          "name": "Entrance",
+          "x": 4.8,
+          "y": 0.0,
+          "width": 2.6,
+          "height": 1.0
+        },
+        {
+          "name": "WC",
+          "x": 4.8,
+          "y": 1.3,
+          "width": 2.35,
+          "height": 1.65
+        }
+      ]
+    },
+    "esp_markers": [
+      {
+        "id": "ESP_1",
+        "x": 50,
+        "y": 20
+      },
+      {
+        "id": "ESP_2",
+        "x": 25,
+        "y": 70
+      },
+      {
+        "id": "ESP_3",
+        "x": 70,
+        "y": 55
+      },
+      {
+        "id": "ESP_4",
+        "x": 88,
+        "y": 38
+      }
+    ]
   }
 }
