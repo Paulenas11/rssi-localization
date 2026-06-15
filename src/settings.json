@@ -28,12 +28,12 @@
     }
   },
   "shelter": {
-    "name": "Dorm room shelter",
+    "name": "KTU 10 dorm shelter",
     "capacity": 10,
     "udp_port": 5005,
-    "device_timeout": 15,
+    "device_timeout": 10.0,
     "min_rssi_in_shelter": -75,
-    "min_nodes_in_shelter": 1,
+    "min_nodes_in_shelter": 2,
     "ignored_macs": [
       "AC:A7:04:BE:5F:F8",
       "AC:A7:04:BD:3B:20",
@@ -77,23 +77,23 @@
     "esp_markers": [
       {
         "id": "ESP_1",
-        "x": 50,
-        "y": 20
+        "x_m": 3.25,
+        "y_m": 0.6
       },
       {
         "id": "ESP_2",
-        "x": 25,
-        "y": 70
+        "x_m": 1.0,
+        "y_m": 2.4
       },
       {
         "id": "ESP_3",
-        "x": 70,
-        "y": 55
+        "x_m": 6.4,
+        "y_m": 0.8
       },
       {
         "id": "ESP_4",
-        "x": 88,
-        "y": 38
+        "x_m": 6.4,
+        "y_m": 2.4
       }
     ]
   }
