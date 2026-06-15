@@ -9,14 +9,14 @@
 
 #define MAX_DEVICES 64
 #define PRINT_INTERVAL_MS 2000
-#define MIN_PACKETS_TO_SHOW 20
+#define MIN_PACKETS_TO_SHOW 50
 #define MIN_RSSI_IN_SHELTER -75
 #define DEVICE_TIMEOUT_MS 15000
 #define UDP_SEND_INTERVAL_MS 2000
 #define ESP_ID 1
 
 const char* WIFI_SSID = "paul";
-const char* WIFI_PASS = "mptd7506";
+const char* WIFI_PASS = "gynimas26";
 const char* SERVER_IP = "192.168.137.1";
 const int SERVER_PORT = 5005;
 
@@ -276,7 +276,6 @@ void send_udp_data() {
     obj["ssid"] = WIFI_SSID;
     obj["rssi"] = devices[i].rssi;
     obj["packets"] = devices[i].packets;
-    obj["status"] = get_device_status(devices[i]);
   }
 
   if (arr.size() == 0) {
