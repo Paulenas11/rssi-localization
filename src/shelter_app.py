@@ -64,6 +64,8 @@ UDP_PORT = int(SHELTER_SETTINGS.get("udp_port", 5005))
 DEVICE_TIMEOUT = float(SHELTER_SETTINGS.get("device_timeout", 15))
 MIN_RSSI_IN_SHELTER = int(SHELTER_SETTINGS.get("min_rssi_in_shelter", -75))
 MIN_NODES_IN_SHELTER = int(SHELTER_SETTINGS.get("min_nodes_in_shelter", 1))
+RSSI_SMOOTHING_FACTOR = 0.65
+RSSI_EXIT_MARGIN = 5
 IGNORED_MACS = {str(mac).upper() for mac in SHELTER_SETTINGS.get("ignored_macs", [])}
 ESP_IDS = SHELTER_SETTINGS.get("esp_ids", ["ESP_1", "ESP_2", "ESP_3", "ESP_4"])
 FLOOR_PLAN = SHELTER_SETTINGS.get("floor_plan", {"width": 7.4, "height": 3.0})
@@ -139,7 +141,13 @@ def is_multicast_or_broadcast_mac(mac):
     return mac == "FF:FF:FF:FF:FF:FF" or bool(first_byte & 1)
 
 
-def get_status(rssi):
+def get_status(rssi, previous_status=None):
+    if previous_status == "IN_SHELTER":
+        if rssi >= MIN_RSSI_IN_SHELTER - RSSI_EXIT_MARGIN:
+            return "IN_SHELTER"
+
+        return "WEAK_SIGNAL"
+
     if rssi >= MIN_RSSI_IN_SHELTER:
         return "IN_SHELTER"
 
@@ -204,14 +212,23 @@ def update_devices(packet):
         if mac not in devices:
             devices[mac] = {}
 
+        previous_data = devices[mac].get(esp_id, {})
+        previous_rssi = int(previous_data.get("rssi", rssi))
+        previous_status = previous_data.get("status")
+        smoothed_rssi = round(
+            previous_rssi * RSSI_SMOOTHING_FACTOR
+            + rssi * (1 - RSSI_SMOOTHING_FACTOR)
+        )
+
         devices[mac][esp_id] = {
             "esp_id": esp_id,
-            "rssi": rssi,
+            "rssi": smoothed_rssi,
+            "raw_rssi": rssi,
             "packets": int(item.get("packets", 0)),
-            "status": get_status(rssi),
+            "status": get_status(smoothed_rssi, previous_status),
             "last_seen": now,
         }
-        print("Updated device:", mac, esp_id, "RSSI", rssi)
+        print("Updated device:", mac, esp_id, "RSSI", smoothed_rssi, "raw", rssi)
 
     save_state()
 
